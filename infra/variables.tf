@@ -33,6 +33,30 @@ variable "service_state_bucket" {
   default     = "coika-auth-tfstate-s3-290294660813-eu-central-1-an"
 }
 
+variable "service_repo_url" {
+  description = "Public GitHub repository of the auth service infrastructure that the failover build runs."
+  type        = string
+  default     = "https://github.com/acortescab/coika-auth_service-infra.git"
+}
+
+variable "service_repo_ref" {
+  description = "Branch, tag or commit of the service repository that the failover build checks out."
+  type        = string
+  default     = "main"
+}
+
+variable "service_ssh_public_key" {
+  description = "SSH public key for the key pair that the auth service creates in the DR region (public, not a secret)."
+  type        = string
+  default     = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICHdpdsU3YKeb31D5HTFwrOX1iiV7gw28PoA4LL2mfVw coika-auth_service"
+}
+
+variable "terraform_version" {
+  description = "Terraform version installed in the failover build."
+  type        = string
+  default     = "1.15.5"
+}
+
 variable "state_bucket" {
   description = "S3 bucket that holds the Terraform state (same as the backend in versions.tf, which cannot use variables)."
   type        = string

@@ -102,8 +102,22 @@ data "aws_iam_policy_document" "github_apply_permissions" {
     condition {
       test     = "StringEquals"
       variable = "iam:PassedToService"
-      values   = ["lambda.amazonaws.com"]
+      values   = ["lambda.amazonaws.com", "codebuild.amazonaws.com"]
     }
+  }
+
+  # --- Failover CodeBuild project
+  statement {
+    actions   = ["codebuild:*"]
+    resources = ["arn:aws:codebuild:${var.dr_region}:${local.account_id}:project/${var.name_prefix}-*"]
+  }
+
+  statement {
+    actions = ["logs:*"]
+    resources = [
+      "arn:aws:logs:${var.dr_region}:${local.account_id}:log-group:/aws/codebuild/${var.name_prefix}-*",
+      "arn:aws:logs:${var.dr_region}:${local.account_id}:log-group:/aws/codebuild/${var.name_prefix}-*:*",
+    ]
   }
 
   # --- Lambda, ECR, logs

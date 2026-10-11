@@ -51,6 +51,20 @@ data "aws_iam_policy_document" "github_apply_permissions" {
     resources = ["arn:aws:s3:::${var.state_bucket}/*"]
   }
 
+  # --- State bucket of the auth service in the DR region (the only bucket this stack creates)
+  statement {
+    actions = [
+      "s3:CreateBucket",
+      "s3:DeleteBucket",
+      "s3:PutBucketVersioning",
+      "s3:PutEncryptionConfiguration",
+      "s3:PutBucketPublicAccessBlock",
+      "s3:PutLifecycleConfiguration",
+      "s3:PutBucketTagging",
+    ]
+    resources = ["arn:aws:s3:::${var.service_state_bucket}"]
+  }
+
   # --- IAM roles of this project
   statement {
     actions = [

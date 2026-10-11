@@ -2,8 +2,8 @@
 # region. It uses its own state (key `regions/<region>/terraform.tfstate`) in the DR-region bucket
 # from service_state.tf, so it does not depend on anything in the primary region.
 #
-# Step 1: the build only runs `terraform plan` (TF_ACTION=plan). Applying is requested per
-# execution with the environment variable override TF_ACTION=apply.
+# Two projects: `-up` runs `terraform plan` by default and applies when started with the override
+# TF_ACTION=apply; `-down` runs `terraform destroy`.
 
 locals {
   failover_project_name = "${var.name_prefix}-auth_service-failover"
@@ -195,9 +195,28 @@ resource "aws_iam_role_policy" "failover" {
   policy = data.aws_iam_policy_document.failover_permissions.json
 }
 
+# One project per direction, each with its own buildspec: starting `-down` is a deliberate act and
+# cannot happen by mistyping a parameter of `-up`.
+locals {
+  failover_projects = {
+    up = {
+      description = "Brings up the auth service in the DR region (TF_ACTION=plan by default, apply to deploy)."
+      buildspec   = "buildspec-up.yml"
+      tf_action   = "plan"
+    }
+    down = {
+      description = "Tears down the auth service in the DR region (terraform destroy; keeps the ECR repository)."
+      buildspec   = "buildspec-down.yml"
+      tf_action   = "destroy"
+    }
+  }
+}
+
 resource "aws_codebuild_project" "failover" {
-  name         = local.failover_project_name
-  description  = "Brings up the auth service in the DR region by running its Terraform."
+  for_each = local.failover_projects
+
+  name         = "${local.failover_project_name}-${each.key}"
+  description  = each.value.description
   service_role = aws_iam_role.failover.arn
 
   build_timeout = 30 # minutes
@@ -218,7 +237,7 @@ resource "aws_codebuild_project" "failover" {
     }
     environment_variable {
       name  = "TF_ACTION"
-      value = "plan"
+      value = each.value.tf_action
     }
     environment_variable {
       name  = "STATE_BUCKET"
@@ -258,14 +277,13 @@ resource "aws_codebuild_project" "failover" {
     }
   }
 
-
   source {
     type            = "GITHUB"
     location        = var.service_repo_url
     git_clone_depth = 1
 
     # Inline buildspec: the cloned service repo does not know about the DR flow.
-    buildspec = file("${path.module}/failover/buildspec.yml")
+    buildspec = file("${path.module}/failover/${each.value.buildspec}")
   }
 
   source_version = var.service_repo_ref

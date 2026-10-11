@@ -7,17 +7,6 @@ on:
         description: Directory of the lambda (contains Dockerfile, requirements-dev.txt and tests/)
         required: true
         type: string
-      ecr_repository:
-        description: ECR repository name for the lambda image
-        required: true
-        type: string
-      function_name:
-        description: Lambda function to update with the new image (on push to main)
-        required: true
-        type: string
-    secrets:
-      AWS_ROLE_ARN:
-        required: true
 
 jobs:
   quality:
@@ -46,53 +35,14 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write
-    env:
-      PUSH_IMAGE: ${{ github.event_name == 'push' }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Configure AWS credentials
-        if: env.PUSH_IMAGE == 'true'
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION }}
-
-      - name: Login to Amazon ECR
-        if: env.PUSH_IMAGE == 'true'
-        id: ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Compute image tags
-        id: tags
-        run: |
-          if [ "$PUSH_IMAGE" = "true" ]; then
-            image="${{ steps.ecr.outputs.registry }}/${{ inputs.ecr_repository }}"
-            {
-              echo "tags<<EOF"
-              echo "$image:$GITHUB_SHA"
-              echo "$image:latest"
-              echo "EOF"
-            } >> "$GITHUB_OUTPUT"
-          else
-            echo "tags=lambda-ci:local" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Build (and push on main) image
+      - name: Build image (not pushed)
         uses: docker/build-push-action@v6
         with:
           context: ${{ inputs.lambda_path }}
           file: ${{ inputs.lambda_path }}/Dockerfile
-          push: ${{ env.PUSH_IMAGE == 'true' }}
+          push: false
           provenance: false
-          tags: ${{ steps.tags.outputs.tags }}
-
-      - name: Deploy image to Lambda
-        if: env.PUSH_IMAGE == 'true'
-        run: |
-          aws lambda update-function-code \
-            --function-name "${{ inputs.function_name }}" \
-            --image-uri "${{ steps.ecr.outputs.registry }}/${{ inputs.ecr_repository }}:${{ github.sha }}" \
-            --no-cli-pager
-          aws lambda wait function-updated --function-name "${{ inputs.function_name }}"
+          platforms: linux/amd64
+          tags: lambda-ci:local

@@ -15,10 +15,10 @@ variable "ecr_prefix" {
   default     = "coika/disaster_recovery"
 }
 
-variable "github_repository" {
-  description = "GitHub repository (owner/name) allowed to assume the CI role from the main branch."
+variable "github_sub_prefix" {
+  description = "Prefix of the OIDC `sub` claim of the GitHub repository allowed to assume the CI role from the main branch. This repo uses immutable subjects (owner and repo IDs); get it with `gh api repos/<owner>/<repo>/actions/oidc/customization/sub`."
   type        = string
-  default     = "acortescab/coika-disaster_recovery"
+  default     = "repo:acortescab@289379741/coika-disaster_recovery@1414221119"
 }
 
 variable "create_github_oidc_provider" {

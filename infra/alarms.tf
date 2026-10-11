@@ -1,5 +1,5 @@
 resource "aws_cloudwatch_metric_alarm" "backend_unhealthy" {
-  alarm_name        = "${var.name_prefix}-backend-unhealthy"
+  alarm_name        = "${var.name_prefix}-auth_service-unhealthy"
   alarm_description = "BackendHealth published by auth_service/health_check was below 1 for one minute (backend down)."
 
   namespace   = "Coika/DisasterRecovery"

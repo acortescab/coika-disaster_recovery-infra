@@ -27,6 +27,12 @@ variable "github_apply_environment" {
   default     = "prod"
 }
 
+variable "service_state_bucket" {
+  description = "DR-region S3 bucket that holds the Terraform state of the auth service (coika-auth_service-infra) when it runs in the DR region."
+  type        = string
+  default     = "coika-auth-tfstate-s3-290294660813-eu-central-1-an"
+}
+
 variable "state_bucket" {
   description = "S3 bucket that holds the Terraform state (same as the backend in versions.tf, which cannot use variables)."
   type        = string

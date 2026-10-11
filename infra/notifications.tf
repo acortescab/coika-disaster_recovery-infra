@@ -12,7 +12,7 @@ resource "aws_sns_topic_subscription" "email" {
 }
 
 resource "aws_cloudwatch_event_rule" "backend_alarm" {
-  name        = "${var.name_prefix}-backend-alarm-state"
+  name        = "${var.name_prefix}-auth_service-unhealthy-alarm-state"
   description = "Notify when the backend alarm changes between ALARM and OK."
 
   event_pattern = jsonencode({

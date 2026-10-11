@@ -82,3 +82,64 @@ resource "aws_iam_role_policy" "github_actions" {
   role   = aws_iam_role.github_actions.id
   policy = data.aws_iam_policy_document.github_permissions.json
 }
+
+# ------------------------------------------------------- Terraform plan on pull requests
+# Read-only role for the `terraform plan` job of ci.yml. Pull request tokens have a different
+# `sub` claim than main, so they cannot use the deploy role above (and must not).
+
+data "aws_iam_policy_document" "github_plan_assume" {
+  statement {
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+
+    principals {
+      type        = "Federated"
+      identifiers = [local.github_oidc_provider_arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:sub"
+      values   = ["${var.github_sub_prefix}:pull_request"]
+    }
+  }
+}
+
+resource "aws_iam_role" "github_plan" {
+  name               = "coika-disaster_recovery-plan-role"
+  assume_role_policy = data.aws_iam_policy_document.github_plan_assume.json
+}
+
+resource "aws_iam_role_policy_attachment" "github_plan_read_only" {
+  role       = aws_iam_role.github_plan.name
+  policy_arn = "arn:aws:iam::aws:policy/ReadOnlyAccess"
+}
+
+data "aws_iam_policy_document" "github_plan_state" {
+  statement {
+    actions   = ["s3:ListBucket"]
+    resources = ["arn:aws:s3:::${var.state_bucket}"]
+  }
+
+  statement {
+    actions   = ["s3:GetObject"]
+    resources = ["arn:aws:s3:::${var.state_bucket}/*"]
+  }
+
+  # use_lockfile: plan takes the lock, but must never be able to overwrite the state itself.
+  statement {
+    actions   = ["s3:PutObject", "s3:DeleteObject"]
+    resources = ["arn:aws:s3:::${var.state_bucket}/*.tflock"]
+  }
+}
+
+resource "aws_iam_role_policy" "github_plan_state" {
+  name   = "tfstate-read-and-lock"
+  role   = aws_iam_role.github_plan.id
+  policy = data.aws_iam_policy_document.github_plan_state.json
+}

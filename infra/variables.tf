@@ -21,10 +21,28 @@ variable "github_sub_prefix" {
   default     = "repo:acortescab@289379741/coika-disaster_recovery@1414221119"
 }
 
+variable "github_apply_environment" {
+  description = "GitHub environment (with required reviewers) that is allowed to assume the apply role."
+  type        = string
+  default     = "prod"
+}
+
+variable "state_bucket" {
+  description = "S3 bucket that holds the Terraform state (same as the backend in versions.tf, which cannot use variables)."
+  type        = string
+  default     = "coika-dr-tfstate-s3"
+}
+
 variable "create_github_oidc_provider" {
   description = "Create the GitHub OIDC provider. Set to false if the AWS account already has one (only one per account is allowed)."
   type        = bool
   default     = false
+}
+
+variable "alert_email" {
+  description = "Email that receives the alarm notifications (the subscription must be confirmed from the email AWS sends)."
+  type        = string
+  sensitive   = true # keeps it out of plan output (the PR comment is public)
 }
 
 variable "health_check_url" {

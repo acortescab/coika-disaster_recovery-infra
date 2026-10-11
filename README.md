@@ -45,7 +45,8 @@ pytest
 
 - Only lambdas with changes are processed. If something shared changes (`ruff.toml`, the workflows or `.github/scripts/`), all of them are processed.
 - **CI** (`ci.yml`, on pull requests): lint + tests + image build, nothing is pushed and no AWS access is needed.
-- **CD** (`cd.yml`, on push to `main`): assumes the AWS role via OIDC, pushes the image to ECR with `<sha>` and `latest` tags and updates the Lambda. Deployments are never cancelled by a newer run.
+- **Terraform plan** (job in `ci.yml`): if a PR touches `infra/`, runs `fmt`, `validate` and `plan` with the read-only role `AWS_PLAN_ROLE_ARN` and posts the plan as a PR comment (updated on every push). Needs the variable `HEALTH_CHECK_URL` and the secret `ALERT_EMAIL` (kept out of the public plan comment). Nothing is applied from a PR.
+- **CD** (`cd.yml`, on push to `main`): if `infra/` changed, the `terraform-apply` job waits for approval of the `prod` environment (required reviewer), then plans and applies the saved plan with `AWS_APPLY_ROLE_ARN`. That role is scoped to the `coika-*` resources and cannot modify itself or the plan role, so changes to those two (`infra/github_oidc*.tf`) are applied from a workstation. Then, for lambdas: assumes the AWS role via OIDC, pushes the image to ECR with `<sha>` and `latest` tags and updates the Lambda. Deployments are never cancelled by a newer run.
 - Each lambda runs in parallel and a failure does not cancel the others.
 - Both can be triggered manually (`workflow_dispatch`) to process all lambdas. A manual CD only works from `main`, because the AWS role trusts that branch only.
 

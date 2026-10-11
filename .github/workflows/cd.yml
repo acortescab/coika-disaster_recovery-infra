@@ -5,23 +5,29 @@ on:
     branches: [main]
     paths:
       - "lambdas/**"
+      - "infra/**"
       - "ruff.toml"
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# Never cancel a deployment halfway through.
+# Never cancel a deployment halfway through (it could also leave the Terraform state locked).
 concurrency:
   group: ${{ github.workflow }}
   cancel-in-progress: false
 
+env:
+  # The state was written by this version; an older Terraform refuses to read it.
+  TF_VERSION: "1.15.5"
+
 jobs:
   detect:
-    name: Detect changed lambdas
+    name: Detect changes
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.detect.outputs.matrix }}
+      infra: ${{ steps.infra.outputs.changed }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -32,11 +38,66 @@ jobs:
             --base "${{ github.event.before }}" \
             --ecr-prefix "${{ vars.ECR_REPOSITORY_PREFIX }}" \
             --name-prefix "${{ vars.LAMBDA_NAME_PREFIX }}"
+      - id: infra
+        run: |
+          base="${{ github.event.before }}"
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] || git diff --name-only "$base" HEAD | grep -q '^infra/'; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Infrastructure goes first: a new lambda or role must exist before its image is deployed.
+  terraform-apply:
+    name: Terraform apply
+    needs: detect
+    if: needs.detect.outputs.infra == 'true'
+    runs-on: ubuntu-latest
+    # Required reviewers on this environment are the approval gate. The AWS apply role
+    # trusts this environment only.
+    environment: prod
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: infra
+    env:
+      TF_IN_AUTOMATION: "true"
+      TF_VAR_dr_region: ${{ vars.AWS_REGION }}
+      TF_VAR_name_prefix: ${{ vars.LAMBDA_NAME_PREFIX }}
+      TF_VAR_ecr_prefix: ${{ vars.ECR_REPOSITORY_PREFIX }}
+      TF_VAR_health_check_url: ${{ vars.HEALTH_CHECK_URL }}
+      TF_VAR_alert_email: ${{ secrets.ALERT_EMAIL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_APPLY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Terraform init
+        run: terraform init -input=false
+
+      - name: Terraform plan
+        run: terraform plan -input=false -no-color -lock-timeout=5m -out=tfplan
+
+      # Applies exactly the plan above, not a newer one.
+      - name: Terraform apply
+        run: terraform apply -input=false -no-color -lock-timeout=5m tfplan
 
   deploy:
     name: ${{ matrix.lambda.name }}
-    needs: detect
-    if: needs.detect.outputs.matrix != '[]'
+    needs: [detect, terraform-apply]
+    # Runs when infra was skipped, but not when it failed.
+    if: ${{ !cancelled() && needs.detect.outputs.matrix != '[]' && (needs.terraform-apply.result == 'success' || needs.terraform-apply.result == 'skipped') }}
     strategy:
       fail-fast: false
       matrix:

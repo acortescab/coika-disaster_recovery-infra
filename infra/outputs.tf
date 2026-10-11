@@ -7,6 +7,16 @@ output "github_actions_role_arn" {
   value       = aws_iam_role.github_actions.arn
 }
 
+output "github_apply_role_arn" {
+  description = "Value for the AWS_APPLY_ROLE_ARN secret in GitHub."
+  value       = aws_iam_role.github_apply.arn
+}
+
+output "github_plan_role_arn" {
+  description = "Value for the AWS_PLAN_ROLE_ARN secret in GitHub."
+  value       = aws_iam_role.github_plan.arn
+}
+
 output "health_check_repository_url" {
   value = module.auth_service_health_check.repository_url
 }

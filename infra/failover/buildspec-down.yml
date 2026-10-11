@@ -1,0 +1,25 @@
+# Buildspec of the `-down` CodeBuild project (see infra/codebuild.tf). It destroys the auth service
+# in the DR region. Variables (TF_VERSION, STATE_BUCKET, STATE_KEY, DR_REGION and TF_VAR_*) come from
+# the project's environment.
+#
+# Before running it, point the DNS back to the primary region: the Elastic IP is released.
+version: 0.2
+
+phases:
+  install:
+    commands:
+      - curl -sSfo tf.zip "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip"
+      - unzip -q tf.zip -d /usr/local/bin && terraform version
+  build:
+    commands:
+      - >-
+        terraform init -input=false
+        -backend-config="bucket=${STATE_BUCKET}"
+        -backend-config="region=${DR_REGION}"
+        -backend-config="key=${STATE_KEY}"
+      - |
+        # Keep the replicated repository and its images: forget it instead of deleting it.
+        if terraform state show aws_ecr_repository.app >/dev/null 2>&1; then
+          terraform state rm aws_ecr_repository.app
+        fi
+      - terraform destroy -input=false -auto-approve

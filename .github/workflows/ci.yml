@@ -35,7 +35,8 @@ jobs:
         run: |
           python .github/scripts/changed_lambdas.py \
             --base "${{ github.event.pull_request.base.sha || github.event.before }}" \
-            --ecr-prefix "${{ vars.ECR_REPOSITORY_PREFIX }}"
+            --ecr-prefix "${{ vars.ECR_REPOSITORY_PREFIX }}" \
+            --name-prefix "${{ vars.LAMBDA_NAME_PREFIX }}"
 
   lambda:
     name: ${{ matrix.lambda.name }}
@@ -52,5 +53,6 @@ jobs:
     with:
       lambda_path: ${{ matrix.lambda.path }}
       ecr_repository: ${{ matrix.lambda.ecr_repository }}
+      function_name: ${{ matrix.lambda.function_name }}
     secrets:
       AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}

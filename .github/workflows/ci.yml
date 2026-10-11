@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  pull_request:
+    paths:
+      - "lambdas/**"
+      - ".github/**"
+      - "ruff.toml"
+  push:
+    branches: [main]
+    paths:
+      - "lambdas/**"
+      - ".github/**"
+      - "ruff.toml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  detect:
+    name: Detect changed lambdas
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.detect.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - id: detect
+        run: |
+          python .github/scripts/changed_lambdas.py \
+            --base "${{ github.event.pull_request.base.sha || github.event.before }}" \
+            --ecr-prefix "${{ vars.ECR_REPOSITORY_PREFIX }}"
+
+  lambda:
+    name: ${{ matrix.lambda.name }}
+    needs: detect
+    if: needs.detect.outputs.matrix != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        lambda: ${{ fromJSON(needs.detect.outputs.matrix) }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/lambda-ci.yml
+    with:
+      lambda_path: ${{ matrix.lambda.path }}
+      ecr_repository: ${{ matrix.lambda.ecr_repository }}
+    secrets:
+      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}

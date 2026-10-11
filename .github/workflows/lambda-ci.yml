@@ -1,0 +1,67 @@
+name: Lambda CI
+
+on:
+  workflow_call:
+    inputs:
+      lambda_path:
+        description: Directory of the lambda (contains Dockerfile, requirements-dev.txt and tests/)
+        required: true
+        type: string
+      ecr_repository:
+        description: ECR repository name for the lambda image
+        required: true
+        type: string
+    secrets:
+      AWS_ROLE_ARN:
+        required: true
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.lambda_path }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: ${{ inputs.lambda_path }}/requirements*.txt
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Lint
+        run: ruff check .
+      - name: Test
+        run: pytest
+
+  build:
+    needs: quality
+    runs-on: ubuntu-latest
+    env:
+      PUSH_IMAGE: ${{ github.event_name == 'push' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        if: env.PUSH_IMAGE == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        if: env.PUSH_IMAGE == 'true'
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build (and push on main) image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.lambda_path }}
+          file: ${{ inputs.lambda_path }}/Dockerfile
+          push: ${{ env.PUSH_IMAGE == 'true' }}
+          provenance: false
+          tags: |
+            ${{ env.PUSH_IMAGE == 'true' && format('{0}/{1}:{2}', steps.ecr.outputs.registry, inputs.ecr_repository, github.sha) || 'lambda-ci:local' }}
+            ${{ env.PUSH_IMAGE == 'true' && format('{0}/{1}:latest', steps.ecr.outputs.registry, inputs.ecr_repository) || 'lambda-ci:local' }}

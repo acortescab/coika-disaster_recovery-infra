@@ -45,12 +45,14 @@ def select(lambdas: list[Path], files: list[str] | None) -> list[Path]:
     return [lam for lam in lambdas if any(f.startswith(f"{lam.as_posix()}/") for f in files)]
 
 
-def to_entry(lam: Path, prefix: str) -> dict[str, str]:
+def to_entry(lam: Path, ecr_prefix: str, name_prefix: str) -> dict[str, str]:
     service, name = lam.parts[-2:]
     return {
         "name": f"{service}/{name}",
         "path": lam.as_posix(),
-        "ecr_repository": f"{prefix}/{service}/{name}".strip("/"),
+        "ecr_repository": f"{ecr_prefix}/{service}/{name}".strip("/"),
+        # Must match local.function_name in infra/modules/lambda_container.
+        "function_name": "-".join(part for part in (name_prefix, service, name) if part),
     }
 
 
@@ -58,10 +60,11 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base", default="")
     parser.add_argument("--ecr-prefix", default="")
+    parser.add_argument("--name-prefix", default="")
     args = parser.parse_args()
 
     selected = select(discover(), changed_files(args.base))
-    matrix = json.dumps([to_entry(lam, args.ecr_prefix) for lam in selected])
+    matrix = json.dumps([to_entry(lam, args.ecr_prefix, args.name_prefix) for lam in selected])
     print(matrix)
 
     output = os.environ.get("GITHUB_OUTPUT")

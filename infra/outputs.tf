@@ -1,0 +1,12 @@
+output "health_check_function_name" {
+  value = module.auth_service_health_check.function_name
+}
+
+output "github_actions_role_arn" {
+  description = "Value for the AWS_ROLE_ARN secret in GitHub."
+  value       = aws_iam_role.github_actions.arn
+}
+
+output "health_check_repository_url" {
+  value = module.auth_service_health_check.repository_url
+}

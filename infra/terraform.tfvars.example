@@ -1,0 +1,6 @@
+# Primary region (where the services run): eu-west-1
+# DR region (where this repo is deployed): eu-central-1
+dr_region        = "eu-central-1"
+name_prefix      = "coika"
+ecr_prefix       = "coika/disaster_recovery"
+health_check_url = "https://api.example.com/health"

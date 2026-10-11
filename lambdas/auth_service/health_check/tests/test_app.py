@@ -51,7 +51,7 @@ def test_lambda_handler_returns_health_and_publishes_metric(
     assert request.get_header("User-agent") == "aws-health-check"
     assert urlopen.call_args.kwargs["timeout"] == 5
     cloudwatch.put_metric_data.assert_called_once_with(
-        Namespace="Coika.DisasterRecovery",
+        Namespace="Coika/DisasterRecovery",
         MetricData=[
             {
                 "MetricName": "BackendHealth",

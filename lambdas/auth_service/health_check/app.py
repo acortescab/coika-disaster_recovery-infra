@@ -7,7 +7,7 @@ import boto3
 cloudwatch = boto3.client("cloudwatch")
 
 HEALTH_URL = os.environ["HEALTH_URL"]
-NAMESPACE = "Coika.DisasterRecovery"
+NAMESPACE = "Coika/DisasterRecovery"
 TIMEOUT_SECONDS = 5
 
 

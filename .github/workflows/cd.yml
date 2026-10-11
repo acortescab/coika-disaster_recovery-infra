@@ -1,0 +1,53 @@
+name: CD
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "lambdas/**"
+      - "ruff.toml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never cancel a deployment halfway through.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  detect:
+    name: Detect changed lambdas
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.detect.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: detect
+        run: |
+          python .github/scripts/changed_lambdas.py \
+            --base "${{ github.event.before }}" \
+            --ecr-prefix "${{ vars.ECR_REPOSITORY_PREFIX }}" \
+            --name-prefix "${{ vars.LAMBDA_NAME_PREFIX }}"
+
+  deploy:
+    name: ${{ matrix.lambda.name }}
+    needs: detect
+    if: needs.detect.outputs.matrix != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        lambda: ${{ fromJSON(needs.detect.outputs.matrix) }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/lambda-cd.yml
+    with:
+      lambda_path: ${{ matrix.lambda.path }}
+      ecr_repository: ${{ matrix.lambda.ecr_repository }}
+      function_name: ${{ matrix.lambda.function_name }}
+    secrets:
+      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}

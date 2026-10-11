@@ -15,6 +15,8 @@ LAMBDAS_DIR = Path("lambdas")
 SHARED_PATHS = (
     ".github/workflows/ci.yml",
     ".github/workflows/lambda-ci.yml",
+    ".github/workflows/cd.yml",
+    ".github/workflows/lambda-cd.yml",
     ".github/scripts/",
     "ruff.toml",
 )

@@ -10,8 +10,10 @@ infra/                         # infrastructure as code (Terraform/SAM/CDK): lam
 docs/runbooks/                 # step-by-step recovery procedures
 scripts/                       # operational utilities (failover, restores, ...)
 .github/
-  workflows/ci.yml             # single workflow: detects changed lambdas and runs a matrix
-  workflows/lambda-ci.yml      # reusable: lint, test, build and push to ECR for ONE lambda
+  workflows/ci.yml             # on PR: detects changed lambdas and runs lambda-ci.yml in a matrix
+  workflows/lambda-ci.yml      # reusable: lint, test and build (no push) for ONE lambda
+  workflows/cd.yml             # on push to main: detects changed lambdas and runs lambda-cd.yml in a matrix
+  workflows/lambda-cd.yml      # reusable: build, push to ECR and update the function for ONE lambda
   scripts/changed_lambdas.py   # computes the matrix of affected lambdas
 ruff.toml                      # shared lint config
 ```
@@ -27,7 +29,7 @@ Current lambdas:
 1. Create `lambdas/<service>/<name>/` with `app.py`, `Dockerfile`, `requirements.txt`, `requirements-dev.txt` and `tests/` (copy an existing one).
 2. Create the ECR repository `<ECR_REPOSITORY_PREFIX>/<service>/<name>`.
 
-No YAML needs to be touched: `ci.yml` discovers any `lambdas/*/*/` folder that has a `Dockerfile`.
+No YAML needs to be touched: `ci.yml` and `cd.yml` discover any `lambdas/*/*/` folder that has a `Dockerfile`.
 
 ## Local development
 
@@ -39,13 +41,13 @@ ruff check .
 pytest
 ```
 
-## CI
+## CI / CD
 
-- Only lambdas with changes are processed. If something shared changes (`ruff.toml`, `.github/workflows/ci.yml`, `lambda-ci.yml` or `.github/scripts/`), all of them are processed.
-- On PRs: lint + tests + image build (no push).
-- On push to `main`: also ECR login and push with `<sha>` and `latest` tags.
+- Only lambdas with changes are processed. If something shared changes (`ruff.toml`, the workflows or `.github/scripts/`), all of them are processed.
+- **CI** (`ci.yml`, on pull requests): lint + tests + image build, nothing is pushed and no AWS access is needed.
+- **CD** (`cd.yml`, on push to `main`): assumes the AWS role via OIDC, pushes the image to ECR with `<sha>` and `latest` tags and updates the Lambda. Deployments are never cancelled by a newer run.
 - Each lambda runs in parallel and a failure does not cancel the others.
-- It can also be triggered manually (`workflow_dispatch`) to process all lambdas.
+- Both can be triggered manually (`workflow_dispatch`) to process all lambdas. A manual CD only works from `main`, because the AWS role trusts that branch only.
 
 ## Region strategy
 

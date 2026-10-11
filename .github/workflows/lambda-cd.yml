@@ -1,0 +1,59 @@
+name: Lambda CD
+
+on:
+  workflow_call:
+    inputs:
+      lambda_path:
+        description: Directory of the lambda (contains the Dockerfile)
+        required: true
+        type: string
+      ecr_repository:
+        description: ECR repository name for the lambda image
+        required: true
+        type: string
+      function_name:
+        description: Lambda function to update with the new image
+        required: true
+        type: string
+    secrets:
+      AWS_ROLE_ARN:
+        required: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.lambda_path }}
+          file: ${{ inputs.lambda_path }}/Dockerfile
+          push: true
+          provenance: false
+          platforms: linux/amd64
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/${{ inputs.ecr_repository }}:${{ github.sha }}
+            ${{ steps.ecr.outputs.registry }}/${{ inputs.ecr_repository }}:latest
+
+      - name: Deploy image to Lambda
+        run: |
+          aws lambda update-function-code \
+            --function-name "${{ inputs.function_name }}" \
+            --image-uri "${{ steps.ecr.outputs.registry }}/${{ inputs.ecr_repository }}:${{ github.sha }}" \
+            --no-cli-pager
+          aws lambda wait function-updated --function-name "${{ inputs.function_name }}"

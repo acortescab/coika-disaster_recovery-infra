@@ -113,6 +113,18 @@ data "aws_iam_policy_document" "github_apply_permissions" {
   }
 
   statement {
+    actions = [
+      "codeconnections:CreateConnection",
+      "codeconnections:DeleteConnection",
+      "codeconnections:GetConnection",
+      "codeconnections:ListTagsForResource",
+      "codeconnections:TagResource",
+      "codeconnections:UntagResource",
+    ]
+    resources = ["arn:aws:codeconnections:${var.dr_region}:${local.account_id}:connection/*"]
+  }
+
+  statement {
     actions = ["logs:*"]
     resources = [
       "arn:aws:logs:${var.dr_region}:${local.account_id}:log-group:/aws/codebuild/${var.name_prefix}-*",

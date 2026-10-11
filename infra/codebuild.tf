@@ -50,6 +50,11 @@ data "aws_iam_policy_document" "failover_permissions" {
     ]
   }
 
+  statement {
+    actions   = ["codeconnections:GetConnectionToken", "codeconnections:GetConnection", "codeconnections:UseConnection"]
+    resources = [aws_codeconnections_connection.github.arn]
+  }
+
   # Service state (and the native lockfile).
   statement {
     actions   = ["s3:ListBucket"]
@@ -277,14 +282,28 @@ resource "aws_codebuild_project" "failover" {
     }
   }
 
+  # The service repo may be private: it is cloned through the connection of this region, not the
+  # account's default one (which lives in another region).
   source {
     type            = "GITHUB"
     location        = var.service_repo_url
     git_clone_depth = 1
+
+    auth {
+      type     = "CODECONNECTIONS"
+      resource = aws_codeconnections_connection.github.arn
+    }
 
     # Inline buildspec: the cloned service repo does not know about the DR flow.
     buildspec = file("${path.module}/failover/${each.value.buildspec}")
   }
 
   source_version = var.service_repo_ref
+}
+
+# GitHub App connection in the DR region. It is created PENDING: authorize it once in the console
+# (Developer Tools > Settings > Connections > Update pending connection) before the first build.
+resource "aws_codeconnections_connection" "github" {
+  name          = "${var.name_prefix}-github"
+  provider_type = "GitHub"
 }

@@ -62,9 +62,9 @@ data "aws_iam_policy_document" "failover_sfn" {
     resources = ["arn:aws:states:${var.dr_region}:${local.account_id}:execution:${var.name_prefix}-auth_service-failover:*"]
   }
 
-  # Turns the primary recovery check on while the DR region serves and off otherwise.
+  # Turns the primary recovery check on once the DR region serves (the failback turns it off).
   statement {
-    actions   = ["events:EnableRule", "events:DisableRule"]
+    actions   = ["events:EnableRule"]
     resources = [module.auth_service_primary_recovery_check.schedule_rule_arn]
   }
 
@@ -171,17 +171,6 @@ locals {
       Error = "DbHostNotFound"
       Cause = "The deploy finished but there is no running database host to restore into."
     } : { Type = "Succeed" }
-
-    # A failover starts: the recovery check makes no sense until the DR region serves again. Normally the
-    # rule is already off; this clears a leftover from an earlier cycle. Best effort.
-    DisableRecoveryCheck = {
-      Type       = "Task"
-      Resource   = "arn:aws:states:::aws-sdk:eventbridge:disableRule"
-      Parameters = { Name = module.auth_service_primary_recovery_check.schedule_rule_name }
-      ResultPath = null
-      Catch      = [{ ErrorEquals = ["States.ALL"], ResultPath = null, Next = "StartFailoverBuild" }]
-      Next       = "StartFailoverBuild"
-    }
 
     Restored = { Type = "Succeed" }
 
@@ -339,7 +328,7 @@ resource "aws_sfn_state_machine" "failover" {
           { ErrorEquals = ["DynamoDB.ConditionalCheckFailedException"], ResultPath = null, Next = "ReadFailoverState" },
           { ErrorEquals = ["States.ALL"], ResultPath = "$.lockError", Next = "FailoverStateError" },
         ]
-        Next = "DisableRecoveryCheck"
+        Next = "StartFailoverBuild"
       }
 
       # The lock is taken. If it is a failover in progress, check that its execution is really alive: an
@@ -409,7 +398,7 @@ resource "aws_sfn_state_machine" "failover" {
           { ErrorEquals = ["DynamoDB.ConditionalCheckFailedException"], ResultPath = null, Next = "FailoverAlreadyActive" },
           { ErrorEquals = ["States.ALL"], ResultPath = "$.lockError", Next = "FailoverStateError" },
         ]
-        Next = "DisableRecoveryCheck"
+        Next = "StartFailoverBuild"
       }
 
       FailoverAlreadyActive = {

@@ -50,7 +50,7 @@ data "aws_iam_policy_document" "failback_sfn" {
   }
 
   statement {
-    actions   = ["events:EnableRule", "events:DisableRule"]
+    actions   = ["events:DisableRule"]
     resources = [module.auth_service_primary_recovery_check.schedule_rule_arn]
   }
 
@@ -88,6 +88,9 @@ resource "aws_iam_role_policy" "failback_sfn" {
 }
 
 locals {
+  # First state after the primary has been marked as the active region (and the recovery check turned off).
+  failback_after_primary = var.failback_teardown_dr ? "TearDownDr" : "NotifyManualTeardown"
+
   # Final status of the failback, written unconditionally: both clear the fields of the recovery check
   # so the next cycle starts clean.
   failback_status_params = {
@@ -128,7 +131,7 @@ locals {
         { ErrorEquals = ["DynamoDB.ConditionalCheckFailedException"], ResultPath = null, Next = "FailbackNotAllowed" },
         { ErrorEquals = ["States.ALL"], ResultPath = null, Next = "FailbackStateError" },
       ]
-      Next = "DisableRecoveryCheck"
+      Next = "CheckPrimaryRegion"
     }
 
     FailbackNotAllowed = {
@@ -141,16 +144,6 @@ locals {
       Type  = "Fail"
       Error = "FailoverStateUnavailable"
       Cause = "The failover state table could not be updated; check its state before starting another failback."
-    }
-
-    # The recovery check has done its job. Best effort.
-    DisableRecoveryCheck = {
-      Type       = "Task"
-      Resource   = "arn:aws:states:::aws-sdk:eventbridge:disableRule"
-      Parameters = { Name = module.auth_service_primary_recovery_check.schedule_rule_name }
-      ResultPath = null
-      Catch      = [{ ErrorEquals = ["States.ALL"], ResultPath = null, Next = "CheckPrimaryRegion" }]
-      Next       = "CheckPrimaryRegion"
     }
 
     # Same probes as the outage check, as a last look before anything is changed.
@@ -317,7 +310,38 @@ locals {
       Parameters = local.failback_status_params["PRIMARY"]
       ResultPath = null
       Catch      = [{ ErrorEquals = ["States.ALL"], ResultPath = null, Next = "FailbackStateError" }]
-      Next       = var.failback_teardown_dr ? "TearDownDr" : "NotifyManualTeardown"
+      Next       = "DisableRecoveryCheck"
+    }
+
+    # The primary serves again, so there is nothing left to watch for. A failure must not fail the
+    # failback (it is already done), but it must not go unnoticed either: it is retried and, if it
+    # keeps failing, announced. While the state is not DR_ACTIVE the lambda does nothing anyway.
+    DisableRecoveryCheck = {
+      Type       = "Task"
+      Resource   = "arn:aws:states:::aws-sdk:eventbridge:disableRule"
+      Parameters = { Name = module.auth_service_primary_recovery_check.schedule_rule_name }
+      ResultPath = null
+      Retry = [{
+        ErrorEquals     = ["States.ALL"]
+        IntervalSeconds = 2
+        MaxAttempts     = 3
+        BackoffRate     = 2
+      }]
+      Catch = [{ ErrorEquals = ["States.ALL"], ResultPath = null, Next = "NotifyRecoveryCheckStillOn" }]
+      Next  = local.failback_after_primary
+    }
+
+    NotifyRecoveryCheckStillOn = {
+      Type     = "Task"
+      Resource = "arn:aws:states:::sns:publish"
+      Parameters = {
+        TopicArn = aws_sns_topic.alerts.arn
+        Subject  = "Failback: the primary recovery check could not be turned off"
+        Message  = "The failback itself worked, but the schedule of primary_recovery_check could not be disabled. It does nothing while the state is PRIMARY, but it keeps running. Disable it by hand: aws events disable-rule --name ${module.auth_service_primary_recovery_check.schedule_rule_name}"
+      }
+      ResultPath = null
+      Catch      = [{ ErrorEquals = ["States.ALL"], ResultPath = null, Next = local.failback_after_primary }]
+      Next       = local.failback_after_primary
     }
 
     FailbackDone = {
@@ -330,16 +354,6 @@ locals {
       Type       = "Task"
       Resource   = "arn:aws:states:::dynamodb:updateItem"
       Parameters = local.failback_status_params["DR_ACTIVE"]
-      ResultPath = null
-      Catch      = [{ ErrorEquals = ["States.ALL"], ResultPath = null, Next = "EnableRecoveryCheck" }]
-      Next       = "EnableRecoveryCheck"
-    }
-
-    # The DR region serves again, so keep watching for the primary. Best effort.
-    EnableRecoveryCheck = {
-      Type       = "Task"
-      Resource   = "arn:aws:states:::aws-sdk:eventbridge:enableRule"
-      Parameters = { Name = module.auth_service_primary_recovery_check.schedule_rule_name }
       ResultPath = null
       Catch      = [{ ErrorEquals = ["States.ALL"], ResultPath = null, Next = "NotifyAborted" }]
       Next       = "NotifyAborted"

@@ -138,8 +138,10 @@ data "aws_iam_policy_document" "github_apply_permissions" {
     resources = ["arn:aws:lambda:${var.dr_region}:${local.account_id}:function:${var.name_prefix}-*"]
   }
 
+  # The repositories belong to the lambdas repository; creating a function from an image only
+  # needs to read it.
   statement {
-    actions   = ["ecr:*"]
+    actions   = ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"]
     resources = ["arn:aws:ecr:${var.dr_region}:${local.account_id}:repository/${var.ecr_prefix}/*"]
   }
 

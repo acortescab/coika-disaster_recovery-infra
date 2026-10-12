@@ -1,6 +1,4 @@
-# Role assumed by the CD of the lambdas repository (coika-disaster_recovery; secret AWS_ROLE_ARN there)
-# to push images to ECR and update the lambdas. Only its main branch can assume it, which is when
-# that workflow deploys. The roles below (plan, apply) belong to this repository.
+# Roles of this repository's own workflows (plan, apply). The lambdas repository has its own roles.
 
 data "aws_caller_identity" "current" {}
 
@@ -22,71 +20,9 @@ locals {
   account_id               = data.aws_caller_identity.current.account_id
 }
 
-data "aws_iam_policy_document" "github_assume" {
-  statement {
-    actions = ["sts:AssumeRoleWithWebIdentity"]
-
-    principals {
-      type        = "Federated"
-      identifiers = [local.github_oidc_provider_arn]
-    }
-
-    condition {
-      test     = "StringEquals"
-      variable = "token.actions.githubusercontent.com:aud"
-      values   = ["sts.amazonaws.com"]
-    }
-
-    condition {
-      test     = "StringEquals"
-      variable = "token.actions.githubusercontent.com:sub"
-      values   = ["${var.lambdas_github_sub_prefix}:ref:refs/heads/main"]
-    }
-  }
-}
-
-resource "aws_iam_role" "github_actions" {
-  name               = "coika-disaster_recovery-role"
-  assume_role_policy = data.aws_iam_policy_document.github_assume.json
-}
-
-data "aws_iam_policy_document" "github_permissions" {
-  statement {
-    actions   = ["ecr:GetAuthorizationToken"]
-    resources = ["*"]
-  }
-
-  statement {
-    actions = [
-      "ecr:BatchCheckLayerAvailability",
-      "ecr:BatchGetImage",
-      "ecr:CompleteLayerUpload",
-      "ecr:GetDownloadUrlForLayer",
-      "ecr:InitiateLayerUpload",
-      "ecr:PutImage",
-      "ecr:UploadLayerPart",
-    ]
-    resources = ["arn:aws:ecr:${var.dr_region}:${local.account_id}:repository/${var.ecr_prefix}/*"]
-  }
-
-  statement {
-    actions = [
-      "lambda:UpdateFunctionCode",
-      "lambda:GetFunctionConfiguration",
-    ]
-    resources = ["arn:aws:lambda:${var.dr_region}:${local.account_id}:function:${var.name_prefix}-*"]
-  }
-}
-
-resource "aws_iam_role_policy" "github_actions" {
-  name   = "ci-deploy"
-  role   = aws_iam_role.github_actions.id
-  policy = data.aws_iam_policy_document.github_permissions.json
-}
-
 # ------------------------------------------------------- Terraform plan on pull requests
 # Read-only role for the `terraform plan` job of ci.yml. Pull request tokens have a different
-# `sub` claim than main, so they cannot use the deploy role above (and must not).
+# `sub` claim than main, so they cannot use the apply role (and must not).
 
 data "aws_iam_policy_document" "github_plan_assume" {
   statement {

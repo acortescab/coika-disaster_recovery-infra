@@ -36,7 +36,6 @@ jobs:
       TF_VAR_name_prefix: ${{ vars.LAMBDA_NAME_PREFIX }}
       TF_VAR_ecr_prefix: ${{ vars.ECR_REPOSITORY_PREFIX }}
       TF_VAR_health_check_url: ${{ vars.HEALTH_CHECK_URL }}
-      TF_VAR_lambdas_github_sub_prefix: ${{ vars.LAMBDAS_GITHUB_SUB_PREFIX }}
       TF_VAR_alert_email: ${{ secrets.ALERT_EMAIL }}
     steps:
       - uses: actions/checkout@v4

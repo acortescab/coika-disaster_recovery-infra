@@ -7,9 +7,9 @@ output "function_arn" {
 }
 
 output "repository_url" {
-  value = aws_ecr_repository.this.repository_url
+  value = data.aws_ecr_repository.this.repository_url
 }
 
 output "repository_arn" {
-  value = aws_ecr_repository.this.arn
+  value = data.aws_ecr_repository.this.arn
 }

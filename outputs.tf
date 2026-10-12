@@ -6,11 +6,6 @@ output "region_check_repository_url" {
   value = module.auth_service_region_check.repository_url
 }
 
-output "github_actions_role_arn" {
-  description = "Value for the AWS_ROLE_ARN secret in GitHub."
-  value       = aws_iam_role.github_actions.arn
-}
-
 output "github_apply_role_arn" {
   description = "Value for the AWS_APPLY_ROLE_ARN secret in GitHub."
   value       = aws_iam_role.github_apply.arn

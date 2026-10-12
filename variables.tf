@@ -21,12 +21,6 @@ variable "github_sub_prefix" {
   default     = "repo:acortescab@289379741/coika-disaster_recovery-infra@1414221119"
 }
 
-variable "lambdas_github_sub_prefix" {
-  description = "Same as github_sub_prefix, for the lambdas repository (coika-disaster_recovery): only its main branch can assume the role that pushes images and updates the functions. Get it with `gh api repos/<owner>/coika-disaster_recovery/actions/oidc/customization/sub`."
-  type        = string
-  default     = "repo:acortescab@289379741/coika-disaster_recovery@1415542251"
-}
-
 variable "github_apply_environment" {
   description = "GitHub environment (with required reviewers) that is allowed to assume the apply role."
   type        = string

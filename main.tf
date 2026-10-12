@@ -63,8 +63,10 @@ module "auth_service_primary_recovery_check" {
   service     = "auth_service"
   name        = "primary_recovery_check"
 
-  schedule_expression = "rate(${var.primary_recovery_interval_minutes} minutes)"
-  timeout             = 30 # the probes run in parallel, each with its own short timeout
+  # Disabled while the process is started by hand: uncomment to run it on a schedule.
+  # schedule_expression = "rate(${var.primary_recovery_interval_minutes} minutes)"
+
+  timeout = 30 # the probes run in parallel, each with its own short timeout
 
   environment = {
     STATE_TABLE        = aws_dynamodb_table.failover_state.name
@@ -94,6 +96,12 @@ module "auth_service_health_check" {
   ecr_prefix  = var.ecr_prefix
   service     = "auth_service"
   name        = "health_check"
+
+  # Starts the whole failover process: it publishes the BackendHealth metric that the alarm watches.
+  # Disabled while the process is started by hand: uncomment to run it on a schedule. Before doing so,
+  # see the alarm: its period is 60 s and missing data counts as breaching, so a 5-minute schedule
+  # would leave the alarm in ALARM between runs.
+  # schedule_expression = "rate(1 minute)"
 
   environment = {
     HEALTH_URL = var.health_check_url

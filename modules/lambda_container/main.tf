@@ -125,3 +125,30 @@ resource "aws_lambda_function" "this" {
     ignore_changes = [image_uri]
   }
 }
+
+# ---------------------------------------------------------------- Schedule (optional)
+
+resource "aws_cloudwatch_event_rule" "schedule" {
+  count = var.schedule_expression == null ? 0 : 1
+
+  name                = "${local.function_name}-schedule"
+  description         = "Runs ${local.function_name} on a schedule."
+  schedule_expression = var.schedule_expression
+}
+
+resource "aws_cloudwatch_event_target" "schedule" {
+  count = var.schedule_expression == null ? 0 : 1
+
+  rule = aws_cloudwatch_event_rule.schedule[0].name
+  arn  = aws_lambda_function.this.arn
+}
+
+resource "aws_lambda_permission" "schedule" {
+  count = var.schedule_expression == null ? 0 : 1
+
+  statement_id  = "AllowEventBridgeSchedule"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.this.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.schedule[0].arn
+}

@@ -61,9 +61,10 @@ locals {
       Type     = "Task"
       Resource = "arn:aws:states:::dynamodb:updateItem"
       Parameters = {
-        TableName                = aws_dynamodb_table.failover_state.name
-        Key                      = local.failover_state_key
-        UpdateExpression         = "SET #s = :new, updated_at = :now, execution_arn = :exec"
+        TableName = aws_dynamodb_table.failover_state.name
+        Key       = local.failover_state_key
+        # The recovery fields belong to primary_recovery_check; clear them so each failover starts clean.
+        UpdateExpression         = "SET #s = :new, updated_at = :now, execution_arn = :exec REMOVE recovery_streak, recovery_notified_at"
         ExpressionAttributeNames = { "#s" = "status" }
         ExpressionAttributeValues = {
           ":new"  = { S = s.status }

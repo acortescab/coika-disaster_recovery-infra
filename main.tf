@@ -53,6 +53,40 @@ module "auth_service_region_check" {
   }
 }
 
+# While the DR region serves, checks on a schedule whether the primary region is back and notifies once
+# it has been healthy for long enough to consider a failback. It only reads/updates the failover state.
+module "auth_service_primary_recovery_check" {
+  source = "./modules/lambda_container"
+
+  name_prefix = var.name_prefix
+  ecr_prefix  = var.ecr_prefix
+  service     = "auth_service"
+  name        = "primary_recovery_check"
+
+  schedule_expression = "rate(${var.primary_recovery_interval_minutes} minutes)"
+  timeout             = 30 # the probes run in parallel, each with its own short timeout
+
+  environment = {
+    STATE_TABLE        = aws_dynamodb_table.failover_state.name
+    SNS_TOPIC_ARN      = aws_sns_topic.alerts.arn
+    PRIMARY_REGION     = var.primary_region
+    PROBE_SERVICES     = join(",", var.region_probe_services)
+    PRIMARY_HEALTH_URL = var.primary_recovery_health_url
+    RECOVERY_THRESHOLD = tostring(var.primary_recovery_threshold)
+  }
+
+  policy_statements = [
+    {
+      actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
+      resources = [aws_dynamodb_table.failover_state.arn]
+    },
+    {
+      actions   = ["sns:Publish"]
+      resources = [aws_sns_topic.alerts.arn]
+    },
+  ]
+}
+
 module "auth_service_health_check" {
   source = "./modules/lambda_container"
 

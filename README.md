@@ -12,6 +12,8 @@ alarms.tf, notifications.tf    # BackendHealth alarm -> EventBridge -> SNS email
 stepfunctions.tf               # alarm -> EventBridge -> failover state machine
 failover_state.tf              # DynamoDB table: which region serves + failover lock
 failback.tf                    # failback state machine (DR -> primary), started by hand
+failover_plan.tf               # dry-run state machine (terraform plan of the failover build), manual only
+db_backup_restore.tf           # reusable state machine: optional DB dump + restore on a DB host
 codebuild.tf, failover/        # `-up` / `-down` builds that run the auth service stack in the DR region
 service_state.tf               # DR bucket with the Terraform state of the auth service
 github_oidc*.tf                # AWS roles for the GitHub workflows of this repo (plan, apply)
@@ -28,21 +30,25 @@ scripts/                       # operational utilities
 2. The state machine re-runs the health check several times (`failover_validation_attempts`, every `failover_validation_interval_seconds`). Any healthy answer ends it as a false alarm.
 3. It calls the `region_check` lambda, which probes the public endpoints of `region_probe_services` in `primary_region`. If fewer than `region_probe_failures_required` fail, only the backend is affected: the state machine emails a "local outage" notice and stops without failing over (a single host or AZ is handled where the service runs).
 4. It starts the `-up` CodeBuild project, which runs the auth service Terraform in the DR region. The build runs with `TF_ACTION=apply`: **this deploys the DR stack for real**. To check the build without creating anything, use the dry-run state machine (below).
-5. It calls the `restore_db` lambda, which restores the newest dump on the DR database host through SSM, and waits for it.
+5. It runs the reusable `db_backup_restore` state machine (below) with only the restore: the newest dump on the DR database host, skipped if the DB already has tables.
 
 While the DR region serves, the failover state (`failover_state.tf`, DynamoDB) is `DR_ACTIVE`: it records which region serves and doubles as the lock that prevents a second failover. The `primary_recovery_check` lambda (its schedule is enabled when a failover completes and disabled when a failback completes) counts consecutive healthy checks of the primary region and emails once when it looks recovered.
 
-### Starting a failover by hand (AWS console or CLI)
+### Backup and restore (`db_backup_restore`)
 
-Start an execution of the failover state machine. The input is optional:
+A reusable state machine (`db_backup_restore.tf`) that knows nothing about the auth service or about failover: it optionally dumps a database and restores it on a DB host. Both the failover and the failback call it, and anything else can (another database, by hand). Input:
 
 ```json
-{ "skip_checks": true }
+{
+  "backup":  { "region": "eu-central-1", "instance_name": "my-db-host" },
+  "restore": { "region": "eu-west-1",    "instance_name": "my-db-host" }
+}
 ```
 
-- `skip_checks`: `true` goes straight to the lock and the build, without re-checking the backend or the primary region. Without it a manual run ends as a false alarm if the backend answers.
+- `backup` is optional. Present: it dumps that host to the snapshots bucket of its region and restores *that* dump (the bucket replicates it to the other region and the restore waits for it). Absent: the restore takes the newest dump.
+- `restore` is **destructive**: it replaces the data of that database and does not check whether it is worth keeping. Never run it against a database that is serving good data; the failover and failback state machines guarantee that with their lock.
 
-The lock still applies: nothing starts if the DR region already serves or another failover is running.
+It always succeeds and reports the outcome: `{ "status": "Success" | "NoHost" | "Failed", "phase": "backup" | "restore", "message": ..., "key": ... }`. The caller decides what to do with it.
 
 ### Dry run (`<failover state machine>_plan`)
 
@@ -54,8 +60,8 @@ Started by hand (`aws stepfunctions start-execution --state-machine-arn <failbac
 
 1. Takes the lock (`DR_ACTIVE` -> `FAILING_BACK`; anything else is refused) and probes the primary region once more.
 2. Emails a task token and waits for you to stop the writes in DR (put the API in maintenance), so the dump is complete.
-3. `backup_db` dumps the DR database; the snapshots bucket replicates it to the primary region.
-4. `restore_db` (with `region`, `key` and `overwrite`) restores that dump over the database of the primary host once it has been replicated.
+3. `db_backup_restore` dumps the DR database (`backup_db`); the snapshots bucket replicates it to the primary region.
+4. The same execution restores that dump over the database of the primary host (`restore_db`) once it has been replicated.
 5. Emails a second task token and waits for you to start the API in the primary, switch the DNS and confirm.
 6. Sets the state to `PRIMARY` and turns the recovery check off. With `failback_teardown_dr = true` it then runs the `-down` build; by default it only notifies and `-down` (destroys the auth service in DR, keeping the ECR repository and the DB snapshots bucket) is started by hand.
 

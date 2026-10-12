@@ -31,12 +31,25 @@ resource "aws_iam_role" "failback_sfn" {
 
 data "aws_iam_policy_document" "failback_sfn" {
   statement {
-    actions = ["lambda:InvokeFunction"]
-    resources = [
-      module.auth_service_region_check.function_arn,
-      module.auth_service_backup_db.function_arn,
-      module.auth_service_restore_db.function_arn,
-    ]
+    actions   = ["lambda:InvokeFunction"]
+    resources = [module.auth_service_region_check.function_arn]
+  }
+
+  # Backup and restore of the DB through the reusable state machine (db_backup_restore.tf).
+  statement {
+    actions   = ["states:StartExecution"]
+    resources = [aws_sfn_state_machine.db_backup_restore.arn]
+  }
+
+  statement {
+    actions   = ["states:DescribeExecution", "states:StopExecution"]
+    resources = [local.db_backup_restore_executions_arn]
+  }
+
+  # Managed rule that Step Functions creates to wait for the nested execution (.sync integration).
+  statement {
+    actions   = ["events:PutTargets", "events:PutRule", "events:DescribeRule"]
+    resources = ["arn:aws:events:${var.dr_region}:${local.account_id}:rule/StepFunctionsGetEventsForStepFunctionsExecutionRule"]
   }
 
   statement {
@@ -192,92 +205,38 @@ locals {
       TimeoutSeconds = var.failback_approval_timeout_seconds
       ResultPath     = null
       Catch          = [{ ErrorEquals = ["States.ALL"], ResultPath = "$.error", Next = "AbortFailback" }]
-      Next           = "BackupDr"
+      Next           = "RunBackupRestore"
     }
 
-    # Dump of the DR database. The snapshots bucket replicates it to the primary region.
-    BackupDr = {
+    # Dump of the DR database and restore of that dump over the database of the primary host: the
+    # snapshots bucket replicates it between regions and the restore waits for it. The nested state
+    # machine always succeeds and reports the outcome (and which phase it was in) in its output.
+    RunBackupRestore = {
       Type     = "Task"
-      Resource = "arn:aws:states:::lambda:invoke"
+      Resource = "arn:aws:states:::states:startExecution.sync:2"
       Parameters = {
-        FunctionName = module.auth_service_backup_db.function_arn
-        "Payload.$"  = "$.backup"
+        StateMachineArn = aws_sfn_state_machine.db_backup_restore.arn
+        Input = {
+          backup = {
+            region        = var.dr_region
+            instance_name = var.db_instance_name
+          }
+          restore = {
+            region        = var.primary_region
+            instance_name = var.db_instance_name
+          }
+        }
       }
-      TimeoutSeconds = 930
-      ResultSelector = {
-        "status.$"      = "$.Payload.status"
-        "message.$"     = "$.Payload.message"
-        "key.$"         = "$.Payload.key"
-        "instance_id.$" = "$.Payload.instance_id"
-        "command_id.$"  = "$.Payload.command_id"
-        "started_at.$"  = "$.Payload.started_at"
-      }
-      ResultPath = "$.backup"
-      Retry = [{
-        ErrorEquals     = ["Lambda.ServiceException", "Lambda.TooManyRequestsException"]
-        IntervalSeconds = 2
-        MaxAttempts     = 3
-      }]
-      Catch = [{ ErrorEquals = ["States.ALL"], ResultPath = "$.error", Next = "AbortFailback" }]
-      Next  = "EvaluateBackup"
+      TimeoutSeconds = local.db_backup_restore_timeout_seconds + 300
+      ResultSelector = local.db_backup_restore_result_selector
+      ResultPath     = "$.backupRestore"
+      Catch          = [{ ErrorEquals = ["States.ALL"], ResultPath = "$.error", Next = "AbortFailback" }]
+      Next           = "EvaluateBackupRestore"
     }
 
-    EvaluateBackup = {
-      Type = "Choice"
-      Choices = [
-        { Variable = "$.backup.status", StringEquals = "Success", Next = "StartRestorePrimary" },
-        { Variable = "$.backup.status", StringEquals = "InProgress", Next = "BackupDr" },
-      ]
-      Default = "AbortFailback"
-    }
-
-    StartRestorePrimary = {
-      Type = "Pass"
-      Parameters = {
-        "region"    = var.primary_region
-        "key.$"     = "$.backup.key"
-        "overwrite" = true
-      }
-      ResultPath = "$.restore"
-      Next       = "RestorePrimary"
-    }
-
-    # Same lambda as the failover, pointed at the primary host: it waits until the dump has been
-    # replicated to the primary bucket and restores it over the old data.
-    RestorePrimary = {
-      Type     = "Task"
-      Resource = "arn:aws:states:::lambda:invoke"
-      Parameters = {
-        FunctionName = module.auth_service_restore_db.function_arn
-        "Payload.$"  = "$.restore"
-      }
-      TimeoutSeconds = 930
-      ResultSelector = {
-        "status.$"      = "$.Payload.status"
-        "message.$"     = "$.Payload.message"
-        "instance_id.$" = "$.Payload.instance_id"
-        "command_id.$"  = "$.Payload.command_id"
-        "started_at.$"  = "$.Payload.started_at"
-        "region.$"      = "$.Payload.region"
-        "key.$"         = "$.Payload.key"
-        "overwrite.$"   = "$.Payload.overwrite"
-      }
-      ResultPath = "$.restore"
-      Retry = [{
-        ErrorEquals     = ["Lambda.ServiceException", "Lambda.TooManyRequestsException"]
-        IntervalSeconds = 2
-        MaxAttempts     = 3
-      }]
-      Catch = [{ ErrorEquals = ["States.ALL"], ResultPath = "$.error", Next = "AbortFailback" }]
-      Next  = "EvaluateRestore"
-    }
-
-    EvaluateRestore = {
-      Type = "Choice"
-      Choices = [
-        { Variable = "$.restore.status", StringEquals = "Success", Next = "AskSwitchTraffic" },
-        { Variable = "$.restore.status", StringEquals = "InProgress", Next = "RestorePrimary" },
-      ]
+    EvaluateBackupRestore = {
+      Type    = "Choice"
+      Choices = [{ Variable = "$.backupRestore.status", StringEquals = "Success", Next = "AskSwitchTraffic" }]
       Default = "AbortFailback"
     }
 
@@ -294,7 +253,7 @@ locals {
           "aws stepfunctions send-task-success --task-token {} --task-output 1 ",
           "-- To cancel (the DR region keeps serving; restart its API): ",
           "aws stepfunctions send-task-failure --task-token {} --error Cancelled', ",
-          "$.backup.key, $$.Task.Token, $$.Task.Token)",
+          "$.backupRestore.key, $$.Task.Token, $$.Task.Token)",
         ])
       }
       TimeoutSeconds = var.failback_approval_timeout_seconds
@@ -439,17 +398,9 @@ resource "aws_sfn_state_machine" "failback" {
 
   definition = jsonencode({
     Comment        = "Dumps the DR database, restores it in the primary region and, after two manual confirmations, marks the primary as the active region again."
-    StartAt        = "StartBackup"
+    StartAt        = "AcquireFailbackLock"
     TimeoutSeconds = 3 * var.failback_approval_timeout_seconds
-    States = merge(local.failback_states, local.failback_teardown_states, local.failback_manual_teardown_states, {
-      # Lock first: nothing is changed if the DR region is not the one serving.
-      StartBackup = {
-        Type       = "Pass"
-        Result     = {}
-        ResultPath = "$.backup"
-        Next       = "AcquireFailbackLock"
-      }
-    })
+    States         = merge(local.failback_states, local.failback_teardown_states, local.failback_manual_teardown_states)
   })
 
   logging_configuration {

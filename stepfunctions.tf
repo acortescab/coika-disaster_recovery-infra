@@ -37,12 +37,24 @@ data "aws_iam_policy_document" "failover_sfn" {
 
   statement {
     actions   = ["lambda:InvokeFunction"]
-    resources = [module.auth_service_restore_db.function_arn]
+    resources = [module.auth_service_region_check.function_arn]
+  }
+
+  # Restore of the DB through the backup+restore state machine (db_backup_restore.tf).
+  statement {
+    actions   = ["states:StartExecution"]
+    resources = [aws_sfn_state_machine.db_backup_restore.arn]
   }
 
   statement {
-    actions   = ["lambda:InvokeFunction"]
-    resources = [module.auth_service_region_check.function_arn]
+    actions   = ["states:DescribeExecution", "states:StopExecution"]
+    resources = [local.db_backup_restore_executions_arn]
+  }
+
+  # Managed rule that Step Functions creates to wait for the nested execution (.sync integration).
+  statement {
+    actions   = ["events:PutTargets", "events:PutRule", "events:DescribeRule"]
+    resources = ["arn:aws:events:${var.dr_region}:${local.account_id}:rule/StepFunctionsGetEventsForStepFunctionsExecutionRule"]
   }
 
   statement {
@@ -110,7 +122,7 @@ locals {
       ResultSelector = { "status.$" = "$.Build.BuildStatus", "arn.$" = "$.Build.Arn" }
       ResultPath     = "$.build"
       Catch          = [{ ErrorEquals = ["States.ALL"], ResultPath = "$.buildError", Next = "MarkBuildFailed" }]
-      Next           = "StartRestore"
+      Next           = "RunRestore"
     }
 
     BuildFailed = {
@@ -119,47 +131,33 @@ locals {
       Cause = "The failover build did not finish successfully; see the build logs. The failover state is FAILOVER_FAILED, so a new failover may start."
     }
 
-    StartRestore = {
-      Type       = "Pass"
-      Result     = {}
-      ResultPath = "$.restore"
-      Next       = "RestoreDb"
-    }
-
-    # The lambda finds the DB host, runs the restore on it through SSM and waits. A lambda lives at most
-    # 15 minutes, so while the restore is still running it answers InProgress with the ids to resume
-    # with, and EvaluateRestore calls it again (the whole execution is bounded by TimeoutSeconds, and
-    # the lambda gives up after MAX_WAIT_SECONDS).
-    RestoreDb = {
-      Type           = "Task"
-      Resource       = "arn:aws:states:::lambda:invoke"
-      TimeoutSeconds = 930
+    # Restores the newest dump on the DB host of the DR region (no backup). The restore replaces the data
+    # of that DB: the lock guarantees this state machine only gets here while the DR is not serving. The
+    # backup+restore state machine finds the host, runs the restore through SSM and waits for it; it
+    # always succeeds and reports the outcome in its output.
+    RunRestore = {
+      Type     = "Task"
+      Resource = "arn:aws:states:::states:startExecution.sync:2"
       Parameters = {
-        FunctionName = module.auth_service_restore_db.function_arn
-        "Payload.$"  = "$.restore"
+        StateMachineArn = aws_sfn_state_machine.db_backup_restore.arn
+        Input = {
+          restore = {
+            region        = var.dr_region
+            instance_name = var.db_instance_name
+          }
+        }
       }
-      ResultSelector = {
-        "status.$"      = "$.Payload.status"
-        "message.$"     = "$.Payload.message"
-        "instance_id.$" = "$.Payload.instance_id"
-        "command_id.$"  = "$.Payload.command_id"
-        "started_at.$"  = "$.Payload.started_at"
-      }
-      ResultPath = "$.restore"
-      Retry = [{
-        ErrorEquals     = ["Lambda.ServiceException", "Lambda.TooManyRequestsException"]
-        IntervalSeconds = 2
-        MaxAttempts     = 3
-      }]
-      Catch = [{ ErrorEquals = ["States.ALL"], ResultPath = "$.restoreError", Next = "MarkRestoreFailed" }]
-      Next  = "EvaluateRestore"
+      TimeoutSeconds = local.db_backup_restore_timeout_seconds + 300
+      ResultSelector = local.db_backup_restore_result_selector
+      ResultPath     = "$.restore"
+      Catch          = [{ ErrorEquals = ["States.ALL"], ResultPath = "$.restoreError", Next = "MarkRestoreFailed" }]
+      Next           = "EvaluateRestore"
     }
 
     EvaluateRestore = {
       Type = "Choice"
       Choices = [
         { Variable = "$.restore.status", StringEquals = "Success", Next = "MarkRestored" },
-        { Variable = "$.restore.status", StringEquals = "InProgress", Next = "RestoreDb" },
         { Variable = "$.restore.status", StringEquals = "NoHost", Next = "MarkNoDbHost" },
       ]
       Default = "MarkRestoreFailed"
@@ -176,18 +174,37 @@ locals {
     RestoreFailed = {
       Type  = "Fail"
       Error = "RestoreFailed"
-      Cause = "The database could not be restored from the latest dump; see $.restore.message or the logs of the restore_db lambda."
+      Cause = "The database could not be restored from the latest dump; see the output of the db_backup_restore execution or the logs of the restore_db lambda."
     }
 
-    # The DR region now serves (apply only): start watching for the primary to come back. Best effort,
-    # the failover itself already succeeded.
+    # The DR region now serves: start watching for the primary to come back. If this breaks the
+    # execution fails: a successful execution means everything is in place, and only then should the
+    # traffic be switched.
     EnableRecoveryCheck = {
       Type       = "Task"
       Resource   = "arn:aws:states:::aws-sdk:eventbridge:enableRule"
       Parameters = { Name = module.auth_service_primary_recovery_check.schedule_rule_name }
       ResultPath = null
-      Catch      = [{ ErrorEquals = ["States.ALL"], ResultPath = null, Next = "Restored" }]
-      Next       = "Restored"
+      Retry = [{
+        ErrorEquals     = ["States.ALL"]
+        IntervalSeconds = 2
+        MaxAttempts     = 3
+        BackoffRate     = 2
+      }]
+      Catch = [{ ErrorEquals = ["States.ALL"], ResultPath = null, Next = "RecoveryCheckNotEnabled" }]
+      Next  = "Restored"
+    }
+
+    StateRecordFailed = {
+      Type  = "Fail"
+      Error = "FailoverStateUpdateFailed"
+      Cause = "The DR region is up and restored, but the failover state could not be recorded as DR_ACTIVE. Do not switch the traffic until the state table is checked and fixed."
+    }
+
+    RecoveryCheckNotEnabled = {
+      Type  = "Fail"
+      Error = "RecoveryCheckNotEnabled"
+      Cause = "The DR region is up and restored and the state is DR_ACTIVE, but the schedule of primary_recovery_check could not be enabled. Enable it by hand, then switch the traffic."
     }
   }
 }
@@ -201,10 +218,6 @@ resource "aws_sfn_state_machine" "failover" {
     StartAt        = "CheckFailoverState"
     TimeoutSeconds = 10800
     States = merge(local.failover_states, {
-      # Optional input of a manual execution (the alarm sends none):
-      #   skip_checks  true   start the failover without re-checking the backend and the region
-      #                       (a failover decided by a person)
-      #
       # Cheap early exit when the DR region already serves, so a repeated alarm neither re-runs the
       # checks nor sends a misleading "local outage" email. The real lock is AcquireFailoverLock; a
       # failed read here just continues.
@@ -218,22 +231,13 @@ resource "aws_sfn_state_machine" "failover" {
         }
         ResultSelector = { "status.$" = "$.Item.status.S" }
         ResultPath     = "$.state"
-        Catch          = [{ ErrorEquals = ["States.ALL"], ResultPath = null, Next = "ChooseChecks" }]
+        Catch          = [{ ErrorEquals = ["States.ALL"], ResultPath = null, Next = "InitChecks" }]
         Next           = "EvaluateFailoverState"
       }
 
       EvaluateFailoverState = {
         Type    = "Choice"
         Choices = [{ Variable = "$.state.status", StringEquals = "DR_ACTIVE", Next = "FailoverAlreadyActive" }]
-        Default = "ChooseChecks"
-      }
-
-      ChooseChecks = {
-        Type = "Choice"
-        Choices = [{
-          And  = [{ Variable = "$.skip_checks", IsPresent = true }, { Variable = "$.skip_checks", BooleanEquals = true }]
-          Next = "AcquireFailoverLock"
-        }]
         Default = "InitChecks"
       }
 

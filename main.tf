@@ -37,8 +37,8 @@ module "auth_service_restore_db" {
   ]
 }
 
-# Dumps the DB of the DR host and returns the key of the dump (called by the failback state machine);
-# the snapshots bucket replicates it to the primary region.
+# Dumps the DB of a host and returns the key of the dump (called by the db_backup_restore state
+# machine); the snapshots bucket replicates it to the other region. It can reach hosts of both regions.
 module "auth_service_backup_db" {
   source = "./modules/lambda_container"
 
@@ -63,6 +63,8 @@ module "auth_service_backup_db" {
       resources = [
         "arn:aws:ssm:${var.dr_region}::document/AWS-RunShellScript",
         "arn:aws:ec2:${var.dr_region}:${local.account_id}:instance/*",
+        "arn:aws:ssm:${var.primary_region}::document/AWS-RunShellScript",
+        "arn:aws:ec2:${var.primary_region}:${local.account_id}:instance/*",
       ]
     },
     {

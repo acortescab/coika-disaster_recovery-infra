@@ -396,6 +396,9 @@ resource "aws_sfn_state_machine" "failback" {
   name     = "${var.name_prefix}-auth_service-failback"
   role_arn = aws_iam_role.failback_sfn.arn
 
+  # Step Functions checks the permissions of the role when it saves the definition (see failover).
+  depends_on = [aws_iam_role_policy.failback_sfn]
+
   definition = jsonencode({
     Comment        = "Dumps the DR database, restores it in the primary region and, after two manual confirmations, marks the primary as the active region again."
     StartAt        = "AcquireFailbackLock"

@@ -124,6 +124,9 @@ resource "aws_sfn_state_machine" "db_backup_restore" {
   name     = "${var.name_prefix}-db_backup_restore"
   role_arn = aws_iam_role.db_backup_restore_sfn.arn
 
+  # Step Functions checks the permissions of the role when it saves the definition.
+  depends_on = [aws_iam_role_policy.db_backup_restore_sfn]
+
   definition = jsonencode({
     Comment        = "Optionally dumps a database and restores it on another DB host; reusable for any database. See db_backup_restore.tf."
     StartAt        = "HasBackup"

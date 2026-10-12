@@ -86,6 +86,29 @@ variable "failover_validation_interval_seconds" {
   default     = 30
 }
 
+variable "primary_region" {
+  description = "Primary region (where the services run). `region_check` probes the AWS service endpoints of this region to tell a regional outage from a local one."
+  type        = string
+  default     = "eu-west-1"
+}
+
+variable "region_probe_services" {
+  description = "AWS services whose public endpoint in the primary region is probed by `region_check` (`<service>.<primary_region>.amazonaws.com`). Pick services that are independent of each other."
+  type        = list(string)
+  default     = ["sts", "ec2", "s3", "sqs"]
+}
+
+variable "region_probe_failures_required" {
+  description = "How many of the probed endpoints must fail for the primary region to be considered down. Below this the outage is treated as local and no failover starts."
+  type        = number
+  default     = 3
+
+  validation {
+    condition     = var.region_probe_failures_required >= 1 && var.region_probe_failures_required <= length(var.region_probe_services)
+    error_message = "region_probe_failures_required must be between 1 and the number of region_probe_services."
+  }
+}
+
 variable "db_instance_name" {
   description = "Name tag of the database EC2 instance of the auth service stack (its `db_instance_name`). The failover finds the DB host by it."
   type        = string

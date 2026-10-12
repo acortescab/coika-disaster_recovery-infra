@@ -24,8 +24,9 @@ scripts/                       # operational utilities
 
 1. The `BackendHealth` alarm (fed by the `health_check` lambda) goes to `ALARM`. EventBridge emails it and starts the state machine.
 2. The state machine re-runs the health check several times (`failover_validation_attempts`, every `failover_validation_interval_seconds`). Any healthy answer ends it as a false alarm.
-3. It starts the `-up` CodeBuild project, which runs the auth service Terraform in the DR region. With `failover_tf_action = "plan"` (default) it only shows the changes; set `"apply"` to deploy.
-4. It calls the `restore_db` lambda, which restores the newest dump on the DR database host through SSM, and waits for it.
+3. It calls the `region_check` lambda, which probes the public endpoints of `region_probe_services` in `primary_region`. If fewer than `region_probe_failures_required` fail, only the backend is affected: the state machine emails a "local outage" notice and stops without failing over (a single host or AZ is handled where the service runs).
+4. It starts the `-up` CodeBuild project, which runs the auth service Terraform in the DR region. With `failover_tf_action = "plan"` (default) it only shows the changes; set `"apply"` to deploy.
+5. It calls the `restore_db` lambda, which restores the newest dump on the DR database host through SSM, and waits for it.
 
 `-down` (destroys the auth service in DR, keeping the ECR repository and the DB snapshots bucket) is started by hand, after the DNS points back to the primary region.
 

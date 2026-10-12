@@ -1,6 +1,7 @@
 # Backend alarm goes to ALARM -> EventBridge -> Step Functions, which first re-checks the backend
-# several times (any healthy answer = false alarm, stop) and only then starts the failover build
-# (`-up`) in the DR region. It waits for the build (startBuild.sync) so the execution shows its result.
+# several times (any healthy answer = false alarm, stop), then checks that the whole primary region
+# is impaired (if only the backend is down it emails and stops) and only then starts the failover
+# build (`-up`) in the DR region. It waits for the build (startBuild.sync) so the execution shows its result.
 
 resource "aws_cloudwatch_log_group" "failover_sfn" {
   name              = "/aws/vendedlogs/states/${var.name_prefix}-auth_service-failover"
@@ -37,6 +38,16 @@ data "aws_iam_policy_document" "failover_sfn" {
   statement {
     actions   = ["lambda:InvokeFunction"]
     resources = [module.auth_service_restore_db.function_arn]
+  }
+
+  statement {
+    actions   = ["lambda:InvokeFunction"]
+    resources = [module.auth_service_region_check.function_arn]
+  }
+
+  statement {
+    actions   = ["sns:Publish"]
+    resources = [aws_sns_topic.alerts.arn]
   }
 
   # Managed rule that Step Functions creates to wait for the build (.sync integration).
@@ -151,7 +162,7 @@ resource "aws_sfn_state_machine" "failover" {
   role_arn = aws_iam_role.failover_sfn.arn
 
   definition = jsonencode({
-    Comment        = "Confirms the backend is really down, brings up the auth service in the DR region and restores the latest dump."
+    Comment        = "Confirms the backend is really down and the primary region is impaired, brings up the auth service in the DR region and restores the latest dump."
     StartAt        = "InitChecks"
     TimeoutSeconds = 10800
     States = merge(local.failover_states, {
@@ -196,7 +207,67 @@ resource "aws_sfn_state_machine" "failover" {
       MoreChecks = {
         Type    = "Choice"
         Choices = [{ Variable = "$.attempt", NumericLessThan = var.failover_validation_attempts, Next = "WaitBetweenChecks" }]
-        Default = "StartFailoverBuild"
+        Default = "CheckRegion"
+      }
+
+      # The backend is confirmed down. Failing over to another region only makes sense if the primary
+      # region itself is impaired; a single host or AZ is handled where the service runs (Multi-AZ).
+      CheckRegion = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::lambda:invoke"
+        Parameters = {
+          FunctionName = module.auth_service_region_check.function_arn
+          Payload      = {}
+        }
+        ResultSelector = {
+          "down.$"   = "$.Payload.region_down"
+          "failed.$" = "$.Payload.failed"
+          "total.$"  = "$.Payload.total"
+        }
+        ResultPath = "$.region"
+        Retry = [{
+          ErrorEquals     = ["Lambda.ServiceException", "Lambda.TooManyRequestsException"]
+          IntervalSeconds = 2
+          MaxAttempts     = 2
+        }]
+        # Like the health check: a broken checker is not proof of a regional outage.
+        Catch = [{ ErrorEquals = ["States.ALL"], Next = "RegionCheckFailed" }]
+        Next  = "EvaluateRegion"
+      }
+
+      EvaluateRegion = {
+        Type    = "Choice"
+        Choices = [{ Variable = "$.region.down", BooleanEquals = true, Next = "StartFailoverBuild" }]
+        Default = "NotifyLocalOutage"
+      }
+
+      NotifyLocalOutage = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::sns:publish"
+        Parameters = {
+          TopicArn = aws_sns_topic.alerts.arn
+          Subject  = "Backend down, primary region OK: no failover"
+          "Message.$" = join("", [
+            "States.Format('The backend health check keeps failing but the primary region answers (",
+            "{} of {} probes failed). Treated as a local outage: the DR failover was NOT started. ",
+            "Check the backend host and its Availability Zone; start the failover by hand if the region is really affected.', ",
+            "$.region.failed, $.region.total)",
+          ])
+        }
+        ResultPath = null
+        Catch      = [{ ErrorEquals = ["States.ALL"], ResultPath = null, Next = "LocalOutage" }]
+        Next       = "LocalOutage"
+      }
+
+      LocalOutage = {
+        Type    = "Succeed"
+        Comment = "The backend is down but the primary region is not: no failover."
+      }
+
+      RegionCheckFailed = {
+        Type  = "Fail"
+        Error = "RegionCheckFailed"
+        Cause = "The region check lambda failed, so a regional outage could not be confirmed. No failover was started."
       }
 
       WaitBetweenChecks = {

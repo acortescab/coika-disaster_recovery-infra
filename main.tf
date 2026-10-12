@@ -34,6 +34,25 @@ module "auth_service_restore_db" {
   ]
 }
 
+# Tells a primary-region outage from a local one (called by the failover state machine): probes the
+# public endpoints of several AWS services in the primary region. It needs no IAM permissions.
+module "auth_service_region_check" {
+  source = "./modules/lambda_container"
+
+  name_prefix = var.name_prefix
+  ecr_prefix  = var.ecr_prefix
+  service     = "auth_service"
+  name        = "region_check"
+
+  timeout = 20 # the probes run in parallel, each with its own short timeout
+
+  environment = {
+    PRIMARY_REGION    = var.primary_region
+    PROBE_SERVICES    = join(",", var.region_probe_services)
+    MIN_FAILED_PROBES = tostring(var.region_probe_failures_required)
+  }
+}
+
 module "auth_service_health_check" {
   source = "./modules/lambda_container"
 

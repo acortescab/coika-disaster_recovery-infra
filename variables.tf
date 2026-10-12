@@ -18,7 +18,13 @@ variable "ecr_prefix" {
 variable "github_sub_prefix" {
   description = "Prefix of the OIDC `sub` claim of the GitHub repository allowed to assume the CI role from the main branch. This repo uses immutable subjects (owner and repo IDs); get it with `gh api repos/<owner>/<repo>/actions/oidc/customization/sub`."
   type        = string
-  default     = "repo:acortescab@289379741/coika-disaster_recovery@1414221119"
+  default     = "repo:acortescab@289379741/coika-disaster_recovery-infra@1414221119"
+}
+
+variable "lambdas_github_sub_prefix" {
+  description = "Same as github_sub_prefix, for the lambdas repository (coika-disaster_recovery): only its main branch can assume the role that pushes images and updates the functions. Get it with `gh api repos/<owner>/coika-disaster_recovery/actions/oidc/customization/sub`."
+  type        = string
+  default     = "repo:acortescab@289379741/coika-disaster_recovery@1415542251"
 }
 
 variable "github_apply_environment" {
@@ -55,6 +61,35 @@ variable "terraform_version" {
   description = "Terraform version installed in the failover build."
   type        = string
   default     = "1.15.5"
+}
+
+variable "failover_tf_action" {
+  description = "TF_ACTION that the automatic failover (alarm -> Step Functions) passes to the `-up` build: `plan` only shows the changes, `apply` actually brings the service up in the DR region."
+  type        = string
+  default     = "plan"
+
+  validation {
+    condition     = contains(["plan", "apply"], var.failover_tf_action)
+    error_message = "failover_tf_action must be \"plan\" or \"apply\"."
+  }
+}
+
+variable "failover_validation_attempts" {
+  description = "Consecutive failed health re-checks required before the automatic failover starts. A single healthy answer cancels it as a false alarm."
+  type        = number
+  default     = 3
+}
+
+variable "failover_validation_interval_seconds" {
+  description = "Seconds to wait between the health re-checks of the failover validation."
+  type        = number
+  default     = 30
+}
+
+variable "db_instance_name" {
+  description = "Name tag of the database EC2 instance of the auth service stack (its `db_instance_name`). The failover finds the DB host by it."
+  type        = string
+  default     = "coika-auth_service-db-instance"
 }
 
 variable "state_bucket" {

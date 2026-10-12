@@ -1,5 +1,6 @@
-# Role assumed by the GitHub Actions workflows (secret AWS_ROLE_ARN) to push images to ECR and
-# update the lambdas. Only the main branch can assume it, which is when the workflow deploys.
+# Role assumed by the CD of the lambdas repository (coika-disaster_recovery; secret AWS_ROLE_ARN there)
+# to push images to ECR and update the lambdas. Only its main branch can assume it, which is when
+# that workflow deploys. The roles below (plan, apply) belong to this repository.
 
 data "aws_caller_identity" "current" {}
 
@@ -39,7 +40,7 @@ data "aws_iam_policy_document" "github_assume" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["${var.github_sub_prefix}:ref:refs/heads/main"]
+      values   = ["${var.lambdas_github_sub_prefix}:ref:refs/heads/main"]
     }
   }
 }

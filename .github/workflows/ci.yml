@@ -3,10 +3,11 @@ name: CI
 on:
   pull_request:
     paths:
-      - "lambdas/**"
-      - "infra/**"
+      - "*.tf"
+      - "modules/**"
+      - "failover/**"
+      - ".terraform.lock.hcl"
       - ".github/**"
-      - "ruff.toml"
   workflow_dispatch:
 
 permissions:
@@ -22,61 +23,20 @@ env:
   TF_VERSION: "1.15.5"
 
 jobs:
-  detect:
-    name: Detect changes
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.detect.outputs.matrix }}
-      infra: ${{ steps.infra.outputs.changed }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - id: detect
-        run: |
-          python .github/scripts/changed_lambdas.py \
-            --base "${{ github.event.pull_request.base.sha }}"
-      - id: infra
-        run: |
-          base="${{ github.event.pull_request.base.sha }}"
-          if [ -z "$base" ] || git diff --name-only "$base" HEAD | grep -qE '^(infra/|\.github/workflows/ci\.yml)'; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          fi
-
-  lambda:
-    name: ${{ matrix.lambda.name }}
-    needs: detect
-    if: needs.detect.outputs.matrix != '[]'
-    strategy:
-      fail-fast: false
-      matrix:
-        lambda: ${{ fromJSON(needs.detect.outputs.matrix) }}
-    permissions:
-      contents: read
-    uses: ./.github/workflows/lambda-ci.yml
-    with:
-      lambda_path: ${{ matrix.lambda.path }}
-
   terraform-plan:
     name: Terraform plan
-    needs: detect
-    if: needs.detect.outputs.infra == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write
       pull-requests: write
-    defaults:
-      run:
-        working-directory: infra
     env:
       TF_IN_AUTOMATION: "true"
       TF_VAR_dr_region: ${{ vars.AWS_REGION }}
       TF_VAR_name_prefix: ${{ vars.LAMBDA_NAME_PREFIX }}
       TF_VAR_ecr_prefix: ${{ vars.ECR_REPOSITORY_PREFIX }}
       TF_VAR_health_check_url: ${{ vars.HEALTH_CHECK_URL }}
+      TF_VAR_lambdas_github_sub_prefix: ${{ vars.LAMBDAS_GITHUB_SUB_PREFIX }}
       TF_VAR_alert_email: ${{ secrets.ALERT_EMAIL }}
     steps:
       - uses: actions/checkout@v4

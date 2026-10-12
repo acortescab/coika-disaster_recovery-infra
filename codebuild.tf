@@ -12,6 +12,10 @@ locals {
   # Names used by the service stack (project_name and ecr_repository_name defaults).
   service_prefix     = "${var.name_prefix}-auth_service"
   service_ecr_prefix = var.name_prefix
+
+  # <project_name with "_" replaced by "-">-db-snapshots-<account>-<region>, as built by the service stack (s3.tf).
+  db_snapshots_bucket_name = "${replace(local.service_prefix, "_", "-")}-db-snapshots-${local.account_id}-${var.dr_region}"
+  db_snapshots_bucket_arn  = "arn:aws:s3:::${local.db_snapshots_bucket_name}"
 }
 
 resource "aws_cloudwatch_log_group" "failover" {
@@ -100,6 +104,18 @@ data "aws_iam_policy_document" "failover_permissions" {
       "ec2:DisassociateAddress",
       "ec2:ImportKeyPair",
       "ec2:DeleteKeyPair",
+      "ec2:CreateSubnet",
+      "ec2:DeleteSubnet",
+      "ec2:ModifySubnetAttribute",
+      "ec2:CreateRouteTable",
+      "ec2:DeleteRouteTable",
+      "ec2:CreateRoute",
+      "ec2:DeleteRoute",
+      "ec2:ReplaceRoute",
+      "ec2:AssociateRouteTable",
+      "ec2:DisassociateRouteTable",
+      "ec2:CreateNatGateway",
+      "ec2:DeleteNatGateway",
     ]
     resources = ["*"]
 
@@ -108,6 +124,33 @@ data "aws_iam_policy_document" "failover_permissions" {
       variable = "aws:RequestedRegion"
       values   = [var.dr_region]
     }
+  }
+
+  # DB snapshots bucket. In DR it is the replica of the primary bucket: the build adopts it
+  # (terraform import) and never deletes it (see the buildspecs).
+  statement {
+    sid = "DbSnapshotsBucket"
+    actions = [
+      "s3:CreateBucket",
+      "s3:ListBucket",
+      "s3:GetBucket*",
+      "s3:PutBucket*",
+      "s3:Get*Configuration",
+      "s3:Put*Configuration",
+    ]
+    resources = [local.db_snapshots_bucket_arn]
+  }
+
+  # Non-secret parameters of the service (DB_HOST, DB_PORT); the secrets are created by hand.
+  statement {
+    sid = "SsmParameters"
+    actions = [
+      "ssm:PutParameter",
+      "ssm:DeleteParameter",
+      "ssm:AddTagsToResource",
+      "ssm:RemoveTagsFromResource",
+    ]
+    resources = ["arn:aws:ssm:${var.dr_region}:${local.account_id}:parameter/${local.service_prefix}/*"]
   }
 
   statement {
@@ -255,6 +298,10 @@ resource "aws_codebuild_project" "failover" {
     environment_variable {
       name  = "DR_REGION"
       value = var.dr_region
+    }
+    environment_variable {
+      name  = "DB_SNAPSHOTS_BUCKET"
+      value = local.db_snapshots_bucket_name
     }
 
     # Variables of the service stack (TF_VAR_*). The rest keep the defaults of its repository.

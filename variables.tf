@@ -58,7 +58,7 @@ variable "terraform_version" {
 }
 
 variable "failover_tf_action" {
-  description = "TF_ACTION that the automatic failover (alarm -> Step Functions) passes to the `-up` build: `plan` only shows the changes, `apply` actually brings the service up in the DR region."
+  description = "Default mode of a failover execution that has no `tf_action` in its input, which is the case of the ones started by the alarm. `plan` only shows the changes and leaves the primary as the active region, `apply` actually brings the service up in the DR region. An execution started by hand can override it with the input {\"tf_action\": \"apply\"} or {\"tf_action\": \"plan\"}."
   type        = string
   default     = "plan"
 

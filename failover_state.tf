@@ -46,16 +46,14 @@ resource "aws_dynamodb_table_item" "failover_state" {
 locals {
   failover_state_key = { service = { S = "auth_service" } }
 
-  # With `plan` nothing is brought up, so a "successful" failover leaves the primary as the active region.
-  failover_success_status = var.failover_tf_action == "apply" ? "DR_ACTIVE" : "PRIMARY"
-
   # Final failover states: record the outcome, then continue to the terminal state. A failed update
   # must not hide the real result, so every error moves on to the same next state.
+  #
+  # Only executions in mode `apply` get here: a `plan` is a dry run that never touches this table.
   failover_status_updates = {
     for name, s in {
-      # Only a real failover (apply) leaves the DR region serving and needs the recovery check.
-      MarkRestored      = { status = local.failover_success_status, next = var.failover_tf_action == "apply" ? "EnableRecoveryCheck" : "Restored" }
-      MarkNoDbHost      = { status = var.failover_tf_action == "apply" ? "FAILOVER_FAILED" : "PRIMARY", next = "NoDbHost" }
+      MarkRestored      = { status = "DR_ACTIVE", next = "EnableRecoveryCheck" }
+      MarkNoDbHost      = { status = "FAILOVER_FAILED", next = "NoDbHost" }
       MarkBuildFailed   = { status = "FAILOVER_FAILED", next = "BuildFailed" }
       MarkRestoreFailed = { status = "FAILOVER_FAILED", next = "RestoreFailed" }
       } : name => {

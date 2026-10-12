@@ -104,13 +104,41 @@ locals {
       Parameters = {
         ProjectName = aws_codebuild_project.failover["up"].name
         EnvironmentVariablesOverride = [
-          { Name = "TF_ACTION", Value = var.failover_tf_action, Type = "PLAINTEXT" },
+          { Name = "TF_ACTION", Value = "apply", Type = "PLAINTEXT" },
         ]
       }
       ResultSelector = { "status.$" = "$.Build.BuildStatus", "arn.$" = "$.Build.Arn" }
       ResultPath     = "$.build"
       Catch          = [{ ErrorEquals = ["States.ALL"], ResultPath = "$.buildError", Next = "MarkBuildFailed" }]
       Next           = "StartRestore"
+    }
+
+    # Dry run (mode `plan`): only checks that the build can clone the service repo, reach its state and
+    # produce a plan. Nothing is created and nothing is recorded: no lock, no state table update, no
+    # recovery check, no restore.
+    PlanBuild = {
+      Type     = "Task"
+      Resource = "arn:aws:states:::codebuild:startBuild.sync"
+      Parameters = {
+        ProjectName = aws_codebuild_project.failover["up"].name
+        EnvironmentVariablesOverride = [
+          { Name = "TF_ACTION", Value = "plan", Type = "PLAINTEXT" },
+        ]
+      }
+      ResultPath = null
+      Catch      = [{ ErrorEquals = ["States.ALL"], ResultPath = "$.buildError", Next = "PlanFailed" }]
+      Next       = "PlanDone"
+    }
+
+    PlanDone = {
+      Type    = "Succeed"
+      Comment = "Dry run: the build produced a plan. Nothing was created or recorded."
+    }
+
+    PlanFailed = {
+      Type  = "Fail"
+      Error = "PlanBuildFailed"
+      Cause = "The dry-run build did not finish successfully; see the build logs. Nothing was created or recorded."
     }
 
     BuildFailed = {
@@ -165,12 +193,11 @@ locals {
       Default = "MarkRestoreFailed"
     }
 
-    # With plan nothing is created, so the absence of a host is expected; with apply it is an error.
-    NoDbHost = var.failover_tf_action == "apply" ? {
+    NoDbHost = {
       Type  = "Fail"
       Error = "DbHostNotFound"
       Cause = "The deploy finished but there is no running database host to restore into."
-    } : { Type = "Succeed" }
+    }
 
     Restored = { Type = "Succeed" }
 
@@ -179,13 +206,9 @@ locals {
       Error = "RestoreFailed"
       Cause = "The database could not be restored from the latest dump; see $.restore.message or the logs of the restore_db lambda."
     }
-  }
 
-  # Only reachable (so only defined: Step Functions rejects unreachable states) when the failover really
-  # leaves the DR region serving; MarkRestored skips it with `plan` (see failover_state.tf).
-  failover_apply_states = var.failover_tf_action == "apply" ? {
-    # The DR region now serves: start watching for the primary to come back. Best effort, the
-    # failover itself already succeeded.
+    # The DR region now serves (apply only): start watching for the primary to come back. Best effort,
+    # the failover itself already succeeded.
     EnableRecoveryCheck = {
       Type       = "Task"
       Resource   = "arn:aws:states:::aws-sdk:eventbridge:enableRule"
@@ -194,7 +217,7 @@ locals {
       Catch      = [{ ErrorEquals = ["States.ALL"], ResultPath = null, Next = "Restored" }]
       Next       = "Restored"
     }
-  } : {}
+  }
 }
 
 resource "aws_sfn_state_machine" "failover" {
@@ -203,9 +226,43 @@ resource "aws_sfn_state_machine" "failover" {
 
   definition = jsonencode({
     Comment        = "Confirms the backend is really down and the primary region is impaired, brings up the auth service in the DR region and restores the latest dump."
-    StartAt        = "CheckFailoverState"
+    StartAt        = "ModeInput"
     TimeoutSeconds = 10800
     States = merge(local.failover_states, {
+      # Input of the execution (all optional; the alarm sends none of them):
+      #   tf_action    "plan" | "apply"  mode of the failover, default var.failover_tf_action
+      #   skip_checks  true              start the failover without re-checking the backend and the region
+      #                                  (for a drill or a failover decided by a person)
+      ModeInput = {
+        Type = "Choice"
+        Choices = [
+          {
+            And = [
+              { Variable = "$.tf_action", IsPresent = true },
+              { Not = { Variable = "$.tf_action", StringEquals = "plan" } },
+              { Not = { Variable = "$.tf_action", StringEquals = "apply" } },
+            ]
+            Next = "InvalidMode"
+          },
+          { Variable = "$.tf_action", IsPresent = true, Next = "CheckFailoverState" },
+        ]
+        Default = "DefaultMode"
+      }
+
+      InvalidMode = {
+        Type  = "Fail"
+        Error = "InvalidMode"
+        Cause = "tf_action must be \"plan\" or \"apply\"."
+      }
+
+      # Keeps the rest of the input (skip_checks) and adds the default mode.
+      DefaultMode = {
+        Type       = "Pass"
+        Result     = var.failover_tf_action
+        ResultPath = "$.tf_action"
+        Next       = "CheckFailoverState"
+      }
+
       # Cheap early exit when the DR region already serves, so a repeated alarm neither re-runs the
       # checks nor sends a misleading "local outage" email. The real lock is AcquireFailoverLock; a
       # failed read here just continues.
@@ -219,19 +276,36 @@ resource "aws_sfn_state_machine" "failover" {
         }
         ResultSelector = { "status.$" = "$.Item.status.S" }
         ResultPath     = "$.state"
-        Catch          = [{ ErrorEquals = ["States.ALL"], ResultPath = null, Next = "InitChecks" }]
+        Catch          = [{ ErrorEquals = ["States.ALL"], ResultPath = null, Next = "ChooseChecks" }]
         Next           = "EvaluateFailoverState"
       }
 
       EvaluateFailoverState = {
         Type    = "Choice"
         Choices = [{ Variable = "$.state.status", StringEquals = "DR_ACTIVE", Next = "FailoverAlreadyActive" }]
+        Default = "ChooseChecks"
+      }
+
+      ChooseChecks = {
+        Type = "Choice"
+        Choices = [{
+          And  = [{ Variable = "$.skip_checks", IsPresent = true }, { Variable = "$.skip_checks", BooleanEquals = true }]
+          Next = "ModeBeforeLock"
+        }]
         Default = "InitChecks"
+      }
+
+      # The point of no return for the bookkeeping: `apply` takes the lock and records the failover,
+      # `plan` is a dry run and only runs the build.
+      ModeBeforeLock = {
+        Type    = "Choice"
+        Choices = [{ Variable = "$.tf_action", StringEquals = "apply", Next = "AcquireFailoverLock" }]
+        Default = "PlanBuild"
       }
 
       InitChecks = {
         Type       = "Pass"
-        Parameters = { attempt = 0 }
+        Parameters = { attempt = 0, "tf_action.$" = "$.tf_action" }
         Next       = "CheckHealth"
       }
 
@@ -263,7 +337,7 @@ resource "aws_sfn_state_machine" "failover" {
 
       CountAttempt = {
         Type       = "Pass"
-        Parameters = { "attempt.$" = "States.MathAdd($.attempt, 1)" }
+        Parameters = { "attempt.$" = "States.MathAdd($.attempt, 1)", "tf_action.$" = "$.tf_action" }
         Next       = "MoreChecks"
       }
 
@@ -300,8 +374,15 @@ resource "aws_sfn_state_machine" "failover" {
 
       EvaluateRegion = {
         Type    = "Choice"
-        Choices = [{ Variable = "$.region.down", BooleanEquals = true, Next = "AcquireFailoverLock" }]
-        Default = "NotifyLocalOutage"
+        Choices = [{ Variable = "$.region.down", BooleanEquals = true, Next = "ModeBeforeLock" }]
+        Default = "ModeOnLocalOutage"
+      }
+
+      # A dry run (plan) sends no notifications.
+      ModeOnLocalOutage = {
+        Type    = "Choice"
+        Choices = [{ Variable = "$.tf_action", StringEquals = "apply", Next = "NotifyLocalOutage" }]
+        Default = "LocalOutage"
       }
 
       # Records that a failover is running. The condition makes it a lock: if the DR region already
@@ -457,7 +538,7 @@ resource "aws_sfn_state_machine" "failover" {
         Error = "HealthCheckFailed"
         Cause = "The health check lambda failed, so the outage could not be confirmed. No failover was started."
       }
-    }, local.failover_status_updates, local.failover_apply_states)
+    }, local.failover_status_updates)
   })
 
   logging_configuration {

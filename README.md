@@ -72,7 +72,7 @@ Migration note: the module used to create the repositories. Its `removed` blocks
 ## CI / CD
 
 - **Terraform plan** (`ci.yml`, on pull requests touching the Terraform files or `.github/`): runs `fmt`, `validate` and `plan` with the read-only role `AWS_PLAN_ROLE_ARN` and posts the plan as a PR comment (updated on every push). Nothing is applied from a PR.
-- **Terraform apply** (`cd.yml`, on push to `main` touching the Terraform files): waits for approval of the `prod` environment (required reviewer), then plans and applies the saved plan with `AWS_APPLY_ROLE_ARN`. That role is scoped to the `coika-*` resources and cannot modify itself or the plan role, so changes to those two (`github_oidc*.tf`) are applied from a workstation.
+- **Terraform apply** (`cd.yml`, on push to `main` touching the Terraform files): waits for approval of the `prod` environment (required reviewer), then plans and applies the saved plan with `AWS_APPLY_ROLE_ARN`. That role is scoped to the `coika-*` resources. It can also update its own permissions and the plan role's (they match the prefix), so review changes to `github_oidc*.tf` carefully before approving the `prod` environment. The only manual apply is the one that first creates these roles (or the one that lifts a restriction the live policy still has).
 - Runs are queued, never cancelled: killing Terraform halfway can leave the state locked.
 
 ## GitHub configuration (Settings > Secrets and variables > Actions)

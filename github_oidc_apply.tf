@@ -2,8 +2,9 @@
 # environment `prod`, whose required reviewers act as the approval gate.
 #
 # It is NOT a full admin: writes are limited to the resources this repo manages (prefix
-# `coika`), and it cannot modify itself or the plan role, so a bad merge cannot grant itself
-# more permissions. Changes to those two roles must be applied from a workstation.
+# `coika`). That includes this role and the plan role (their names match the prefix), so the
+# pipeline can update its own permissions: the approval of the `prod` environment is the only gate
+# against a change that grants more access. There is deliberately no explicit Deny on these roles.
 
 data "aws_iam_policy_document" "github_apply_assume" {
   statement {
@@ -168,9 +169,15 @@ data "aws_iam_policy_document" "github_apply_permissions" {
   }
 
   # The repositories belong to the lambdas repository; creating a function from an image only
-  # needs to read it.
+  # needs to read it. The repository policy actions let Lambda grant itself pull access to the image
+  # when the function is created (without them: "Lambda does not have permission to access the ECR image").
   statement {
-    actions   = ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"]
+    actions = [
+      "ecr:BatchGetImage",
+      "ecr:GetDownloadUrlForLayer",
+      "ecr:GetRepositoryPolicy",
+      "ecr:SetRepositoryPolicy",
+    ]
     resources = ["arn:aws:ecr:${var.dr_region}:${local.account_id}:repository/${var.ecr_prefix}/*"]
   }
 
@@ -213,27 +220,6 @@ data "aws_iam_policy_document" "github_apply_permissions" {
   statement {
     actions   = ["sns:*"]
     resources = ["arn:aws:sns:${var.dr_region}:${local.account_id}:${var.name_prefix}-*"]
-  }
-
-  # --- This role and the plan role are off limits for the pipeline.
-  statement {
-    effect = "Deny"
-    actions = [
-      "iam:CreateRole",
-      "iam:DeleteRole",
-      "iam:UpdateRole",
-      "iam:UpdateAssumeRolePolicy",
-      "iam:PutRolePolicy",
-      "iam:DeleteRolePolicy",
-      "iam:AttachRolePolicy",
-      "iam:DetachRolePolicy",
-      "iam:TagRole",
-      "iam:UntagRole",
-    ]
-    resources = [
-      aws_iam_role.github_apply.arn,
-      aws_iam_role.github_plan.arn,
-    ]
   }
 }
 

@@ -172,17 +172,6 @@ locals {
       Cause = "The deploy finished but there is no running database host to restore into."
     } : { Type = "Succeed" }
 
-    # The DR region now serves: start watching for the primary to come back. Best effort, the failover
-    # itself already succeeded.
-    EnableRecoveryCheck = {
-      Type       = "Task"
-      Resource   = "arn:aws:states:::aws-sdk:eventbridge:enableRule"
-      Parameters = { Name = module.auth_service_primary_recovery_check.schedule_rule_name }
-      ResultPath = null
-      Catch      = [{ ErrorEquals = ["States.ALL"], ResultPath = null, Next = "Restored" }]
-      Next       = "Restored"
-    }
-
     # A failover starts: the recovery check makes no sense until the DR region serves again. Normally the
     # rule is already off; this clears a leftover from an earlier cycle. Best effort.
     DisableRecoveryCheck = {
@@ -202,6 +191,21 @@ locals {
       Cause = "The database could not be restored from the latest dump; see $.restore.message or the logs of the restore_db lambda."
     }
   }
+
+  # Only reachable (so only defined: Step Functions rejects unreachable states) when the failover really
+  # leaves the DR region serving; MarkRestored skips it with `plan` (see failover_state.tf).
+  failover_apply_states = var.failover_tf_action == "apply" ? {
+    # The DR region now serves: start watching for the primary to come back. Best effort, the
+    # failover itself already succeeded.
+    EnableRecoveryCheck = {
+      Type       = "Task"
+      Resource   = "arn:aws:states:::aws-sdk:eventbridge:enableRule"
+      Parameters = { Name = module.auth_service_primary_recovery_check.schedule_rule_name }
+      ResultPath = null
+      Catch      = [{ ErrorEquals = ["States.ALL"], ResultPath = null, Next = "Restored" }]
+      Next       = "Restored"
+    }
+  } : {}
 }
 
 resource "aws_sfn_state_machine" "failover" {
@@ -464,7 +468,7 @@ resource "aws_sfn_state_machine" "failover" {
         Error = "HealthCheckFailed"
         Cause = "The health check lambda failed, so the outage could not be confirmed. No failover was started."
       }
-    }, local.failover_status_updates)
+    }, local.failover_status_updates, local.failover_apply_states)
   })
 
   logging_configuration {

@@ -320,49 +320,6 @@ locals {
       Next       = var.failback_teardown_dr ? "TearDownDr" : "NotifyManualTeardown"
     }
 
-    TearDownDr = {
-      Type     = "Task"
-      Resource = "arn:aws:states:::codebuild:startBuild.sync"
-      Parameters = {
-        ProjectName = aws_codebuild_project.failover["down"].name
-      }
-      ResultPath = null
-      Catch      = [{ ErrorEquals = ["States.ALL"], ResultPath = null, Next = "NotifyTeardownFailed" }]
-      Next       = "FailbackDone"
-    }
-
-    NotifyTeardownFailed = {
-      Type     = "Task"
-      Resource = "arn:aws:states:::sns:publish"
-      Parameters = {
-        TopicArn = aws_sns_topic.alerts.arn
-        Subject  = "Failback done, but the DR teardown failed"
-        Message  = "The auth service is back on the primary region, but the -down build failed. The DR stack is still running (and costing money): check the build logs and start the -down build again."
-      }
-      ResultPath = null
-      Catch      = [{ ErrorEquals = ["States.ALL"], ResultPath = null, Next = "TeardownFailed" }]
-      Next       = "TeardownFailed"
-    }
-
-    TeardownFailed = {
-      Type  = "Fail"
-      Error = "DrTeardownFailed"
-      Cause = "The failback finished (the state is PRIMARY) but the -down build failed; the DR stack is still running."
-    }
-
-    NotifyManualTeardown = {
-      Type     = "Task"
-      Resource = "arn:aws:states:::sns:publish"
-      Parameters = {
-        TopicArn = aws_sns_topic.alerts.arn
-        Subject  = "Failback done: the DR stack is still running"
-        Message  = "The auth service is back on the primary region. The DR stack was left running: start the -down build when you are sure the primary is stable."
-      }
-      ResultPath = null
-      Catch      = [{ ErrorEquals = ["States.ALL"], ResultPath = null, Next = "FailbackDone" }]
-      Next       = "FailbackDone"
-    }
-
     FailbackDone = {
       Type    = "Succeed"
       Comment = "The primary region serves again."
@@ -409,6 +366,59 @@ locals {
   }
 }
 
+# What happens after MarkPrimary depends on failback_teardown_dr. Only the states of the chosen branch
+# are defined: Step Functions rejects states that nothing can reach.
+locals {
+  # `for ... if` instead of `cond ? {...} : {}`: the states are objects of different shapes, which a
+  # conditional cannot unify.
+  failback_teardown_states = { for name, state in {
+    TearDownDr = {
+      Type     = "Task"
+      Resource = "arn:aws:states:::codebuild:startBuild.sync"
+      Parameters = {
+        ProjectName = aws_codebuild_project.failover["down"].name
+      }
+      ResultPath = null
+      Catch      = [{ ErrorEquals = ["States.ALL"], ResultPath = null, Next = "NotifyTeardownFailed" }]
+      Next       = "FailbackDone"
+    }
+
+    NotifyTeardownFailed = {
+      Type     = "Task"
+      Resource = "arn:aws:states:::sns:publish"
+      Parameters = {
+        TopicArn = aws_sns_topic.alerts.arn
+        Subject  = "Failback done, but the DR teardown failed"
+        Message  = "The auth service is back on the primary region, but the -down build failed. The DR stack is still running (and costing money): check the build logs and start the -down build again."
+      }
+      ResultPath = null
+      Catch      = [{ ErrorEquals = ["States.ALL"], ResultPath = null, Next = "TeardownFailed" }]
+      Next       = "TeardownFailed"
+    }
+
+    TeardownFailed = {
+      Type  = "Fail"
+      Error = "DrTeardownFailed"
+      Cause = "The failback finished (the state is PRIMARY) but the -down build failed; the DR stack is still running."
+    }
+  } : name => state if var.failback_teardown_dr }
+
+  failback_manual_teardown_states = { for name, state in {
+    NotifyManualTeardown = {
+      Type     = "Task"
+      Resource = "arn:aws:states:::sns:publish"
+      Parameters = {
+        TopicArn = aws_sns_topic.alerts.arn
+        Subject  = "Failback done: the DR stack is still running"
+        Message  = "The auth service is back on the primary region. The DR stack was left running: start the -down build when you are sure the primary is stable."
+      }
+      ResultPath = null
+      Catch      = [{ ErrorEquals = ["States.ALL"], ResultPath = null, Next = "FailbackDone" }]
+      Next       = "FailbackDone"
+    }
+  } : name => state if !var.failback_teardown_dr }
+}
+
 resource "aws_sfn_state_machine" "failback" {
   name     = "${var.name_prefix}-auth_service-failback"
   role_arn = aws_iam_role.failback_sfn.arn
@@ -417,7 +427,7 @@ resource "aws_sfn_state_machine" "failback" {
     Comment        = "Dumps the DR database, restores it in the primary region and, after two manual confirmations, marks the primary as the active region again."
     StartAt        = "StartBackup"
     TimeoutSeconds = 3 * var.failback_approval_timeout_seconds
-    States = merge(local.failback_states, {
+    States = merge(local.failback_states, local.failback_teardown_states, local.failback_manual_teardown_states, {
       # Lock first: nothing is changed if the DR region is not the one serving.
       StartBackup = {
         Type       = "Pass"

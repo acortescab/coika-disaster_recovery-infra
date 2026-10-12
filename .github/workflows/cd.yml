@@ -4,9 +4,10 @@ on:
   push:
     branches: [main]
     paths:
-      - "lambdas/**"
-      - "infra/**"
-      - "ruff.toml"
+      - "*.tf"
+      - "modules/**"
+      - "failover/**"
+      - ".terraform.lock.hcl"
   workflow_dispatch:
 
 permissions:
@@ -22,36 +23,8 @@ env:
   TF_VERSION: "1.15.5"
 
 jobs:
-  detect:
-    name: Detect changes
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.detect.outputs.matrix }}
-      infra: ${{ steps.infra.outputs.changed }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - id: detect
-        run: |
-          python .github/scripts/changed_lambdas.py \
-            --base "${{ github.event.before }}" \
-            --ecr-prefix "${{ vars.ECR_REPOSITORY_PREFIX }}" \
-            --name-prefix "${{ vars.LAMBDA_NAME_PREFIX }}"
-      - id: infra
-        run: |
-          base="${{ github.event.before }}"
-          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] || git diff --name-only "$base" HEAD | grep -q '^infra/'; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          fi
-
-  # Infrastructure goes first: a new lambda or role must exist before its image is deployed.
   terraform-apply:
     name: Terraform apply
-    needs: detect
-    if: needs.detect.outputs.infra == 'true'
     runs-on: ubuntu-latest
     # Required reviewers on this environment are the approval gate. The AWS apply role
     # trusts this environment only.
@@ -59,15 +32,13 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    defaults:
-      run:
-        working-directory: infra
     env:
       TF_IN_AUTOMATION: "true"
       TF_VAR_dr_region: ${{ vars.AWS_REGION }}
       TF_VAR_name_prefix: ${{ vars.LAMBDA_NAME_PREFIX }}
       TF_VAR_ecr_prefix: ${{ vars.ECR_REPOSITORY_PREFIX }}
       TF_VAR_health_check_url: ${{ vars.HEALTH_CHECK_URL }}
+      TF_VAR_lambdas_github_sub_prefix: ${{ vars.LAMBDAS_GITHUB_SUB_PREFIX }}
       TF_VAR_alert_email: ${{ secrets.ALERT_EMAIL }}
     steps:
       - uses: actions/checkout@v4
@@ -93,22 +64,3 @@ jobs:
       - name: Terraform apply
         run: terraform apply -input=false -no-color -lock-timeout=5m tfplan
 
-  deploy:
-    name: ${{ matrix.lambda.name }}
-    needs: [detect, terraform-apply]
-    # Runs when infra was skipped, but not when it failed.
-    if: ${{ !cancelled() && needs.detect.outputs.matrix != '[]' && (needs.terraform-apply.result == 'success' || needs.terraform-apply.result == 'skipped') }}
-    strategy:
-      fail-fast: false
-      matrix:
-        lambda: ${{ fromJSON(needs.detect.outputs.matrix) }}
-    permissions:
-      contents: read
-      id-token: write
-    uses: ./.github/workflows/lambda-cd.yml
-    with:
-      lambda_path: ${{ matrix.lambda.path }}
-      ecr_repository: ${{ matrix.lambda.ecr_repository }}
-      function_name: ${{ matrix.lambda.function_name }}
-    secrets:
-      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}

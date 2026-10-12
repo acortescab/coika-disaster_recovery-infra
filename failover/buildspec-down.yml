@@ -1,8 +1,10 @@
-# Buildspec of the `-down` CodeBuild project (see infra/codebuild.tf). It destroys the auth service
+# Buildspec of the `-down` CodeBuild project (see codebuild.tf). It destroys the auth service
 # in the DR region. Variables (TF_VERSION, STATE_BUCKET, STATE_KEY, DR_REGION and TF_VAR_*) come from
 # the project's environment.
 #
 # Before running it, point the DNS back to the primary region: the Elastic IP is released.
+# The database host is destroyed with its disk: check first that its last dump has been replicated
+# back to the primary bucket, or the data written during the failover is lost.
 version: 0.2
 
 phases:
@@ -22,4 +24,11 @@ phases:
         if terraform state show aws_ecr_repository.app >/dev/null 2>&1; then
           terraform state rm aws_ecr_repository.app
         fi
+      - |
+        # Same for the DB snapshots bucket and its settings (versioning, lifecycle, policy...): it is the
+        # replica of the primary bucket and holds the dumps. Destroying it would delete them (force_destroy)
+        # and, by suspending versioning, break the replication between the two regions.
+        for res in $(terraform state list | grep -E '^aws_s3_bucket(_[a-z_]+)?\.db_snapshots$' || true); do
+          terraform state rm "$res"
+        done
       - terraform destroy -input=false -auto-approve

@@ -1,54 +1,33 @@
-# aws-disaster-recovery
+# coika-disaster_recovery-infra
 
-Code and automation for AWS disaster recovery. Each lambda is packaged as a container image, validated in CI (ruff + pytest) and pushed to ECR when merged to `main`.
+Infrastructure as code (Terraform, at the root of the repository) of the AWS disaster recovery of the Coika services. It detects that the primary backend is down, confirms it is not a false alarm, brings the auth service up in the DR region and restores its database.
+
+The lambdas it uses live in the sibling repository **coika-disaster_recovery** (code, tests, image build and deploy). This repo creates their ECR repositories, functions and permissions, and wires them into the failover.
 
 ## Structure
 
 ```
-lambdas/<service>/<lambda>/    # one folder per lambda (app.py, Dockerfile, requirements*.txt, tests/)
-infra/                         # infrastructure as code (Terraform/SAM/CDK): lambdas, alarms, ECR, IAM
+main.tf                        # one `lambda_container` module call per lambda
+alarms.tf, notifications.tf    # BackendHealth alarm -> EventBridge -> SNS email
+stepfunctions.tf               # alarm -> EventBridge -> failover state machine
+codebuild.tf, failover/        # `-up` / `-down` builds that run the auth service stack in the DR region
+service_state.tf               # DR bucket with the Terraform state of the auth service
+github_oidc*.tf                # AWS roles for the GitHub workflows (plan, apply, lambdas deploy)
+modules/lambda_container/      # ECR repository + role + log group + function (container image)
+variables.tf, versions.tf, outputs.tf, terraform.tfvars.example
 docs/runbooks/                 # step-by-step recovery procedures
-scripts/                       # operational utilities (failover, restores, ...)
-.github/
-  workflows/ci.yml             # on PR: detects changed lambdas and runs lambda-ci.yml in a matrix
-  workflows/lambda-ci.yml      # reusable: lint, test and build (no push) for ONE lambda
-  workflows/cd.yml             # on push to main: detects changed lambdas and runs lambda-cd.yml in a matrix
-  workflows/lambda-cd.yml      # reusable: build, push to ECR and update the function for ONE lambda
-  scripts/changed_lambdas.py   # computes the matrix of affected lambdas
-ruff.toml                      # shared lint config
+scripts/                       # operational utilities
+.github/workflows/             # ci.yml (terraform plan on PRs), cd.yml (terraform apply on main)
 ```
 
-Current lambdas:
+## Failover flow
 
-| Lambda | Description |
-| --- | --- |
-| `auth_service/health_check` | Sends a GET to `HEALTH_URL` and publishes the `BackendHealth` metric to CloudWatch (`Coika/DisasterRecovery`). |
+1. The `BackendHealth` alarm (fed by the `health_check` lambda) goes to `ALARM`. EventBridge emails it and starts the state machine.
+2. The state machine re-runs the health check several times (`failover_validation_attempts`, every `failover_validation_interval_seconds`). Any healthy answer ends it as a false alarm.
+3. It starts the `-up` CodeBuild project, which runs the auth service Terraform in the DR region. With `failover_tf_action = "plan"` (default) it only shows the changes; set `"apply"` to deploy.
+4. It calls the `restore_db` lambda, which restores the newest dump on the DR database host through SSM, and waits for it.
 
-## Adding a new lambda
-
-1. Create `lambdas/<service>/<name>/` with `app.py`, `Dockerfile`, `requirements.txt`, `requirements-dev.txt` and `tests/` (copy an existing one).
-2. Create the ECR repository `<ECR_REPOSITORY_PREFIX>/<service>/<name>`.
-
-No YAML needs to be touched: `ci.yml` and `cd.yml` discover any `lambdas/*/*/` folder that has a `Dockerfile`.
-
-## Local development
-
-```powershell
-cd lambdas/<service>/<name>
-python -m venv .venv; .\.venv\Scripts\Activate.ps1
-pip install -r requirements-dev.txt
-ruff check .
-pytest
-```
-
-## CI / CD
-
-- Only lambdas with changes are processed. If something shared changes (`ruff.toml`, the workflows or `.github/scripts/`), all of them are processed.
-- **CI** (`ci.yml`, on pull requests): lint + tests + image build, nothing is pushed and no AWS access is needed.
-- **Terraform plan** (job in `ci.yml`): if a PR touches `infra/`, runs `fmt`, `validate` and `plan` with the read-only role `AWS_PLAN_ROLE_ARN` and posts the plan as a PR comment (updated on every push). Needs the variable `HEALTH_CHECK_URL` and the secret `ALERT_EMAIL` (kept out of the public plan comment). Nothing is applied from a PR.
-- **CD** (`cd.yml`, on push to `main`): if `infra/` changed, the `terraform-apply` job waits for approval of the `prod` environment (required reviewer), then plans and applies the saved plan with `AWS_APPLY_ROLE_ARN`. That role is scoped to the `coika-*` resources and cannot modify itself or the plan role, so changes to those two (`infra/github_oidc*.tf`) are applied from a workstation. Then, for lambdas: assumes the AWS role via OIDC, pushes the image to ECR with `<sha>` and `latest` tags and updates the Lambda. Deployments are never cancelled by a newer run.
-- Each lambda runs in parallel and a failure does not cancel the others.
-- Both can be triggered manually (`workflow_dispatch`) to process all lambdas. A manual CD only works from `main`, because the AWS role trusts that branch only.
+`-down` (destroys the auth service in DR, keeping the ECR repository and the DB snapshots bucket) is started by hand, after the DNS points back to the primary region.
 
 ## Region strategy
 
@@ -60,38 +39,43 @@ The goal is to survive the loss of an entire AWS region. Therefore **everything 
 
 Single-AZ failures are not handled here: they are absorbed by the services themselves (Multi-AZ).
 
-## Infrastructure (Terraform)
+## Lambdas
 
-`infra/` creates, per lambda: the ECR repository (with a lifecycle policy), the execution role, the log group, the function (container image) and an optional EventBridge schedule. Each lambda is one `module` call in `infra/main.tf`.
+`main.tf` has one `module "lambda_container"` call per lambda in the lambdas repository; the module name and the folder names must match (`<prefix>-<service>-<name>` for the function, `<ecr_prefix>/<service>/<name>` for the repository). The lambdas repository builds and pushes the images and runs `aws lambda update-function-code`, so Terraform only manages infrastructure (it ignores `image_uri` changes).
 
-First deployment (the function needs an image in ECR before it can be created):
+First deployment (a function needs an image in ECR before it can be created):
 
 ```powershell
-cd infra
 copy terraform.tfvars.example terraform.tfvars   # edit the values
 terraform init
-terraform apply -target=module.auth_service_health_check.aws_ecr_repository.this
-# push an image once (merge to main, or docker build/push by hand with the `latest` tag)
+terraform apply -target=module.auth_service_health_check.aws_ecr_repository.this -target=module.auth_service_restore_db.aws_ecr_repository.this
+# in the lambdas repository: merge to main (or docker build/push by hand with the `latest` tag)
 terraform apply
 ```
 
-After that, every merge to `main` builds and pushes the image and CI runs `aws lambda update-function-code`, so Terraform only manages infrastructure (it ignores `image_uri` changes). Function and repository names come from `<prefix>-<service>-<name>` and `<prefix>/<service>/<name>`, and must stay in sync with `changed_lambdas.py`.
+Adding a lambda: add the folder in the lambdas repository, add its `module` call here and apply **before** merging there.
+
+## CI / CD
+
+- **Terraform plan** (`ci.yml`, on pull requests touching the Terraform files or `.github/`): runs `fmt`, `validate` and `plan` with the read-only role `AWS_PLAN_ROLE_ARN` and posts the plan as a PR comment (updated on every push). Nothing is applied from a PR.
+- **Terraform apply** (`cd.yml`, on push to `main` touching the Terraform files): waits for approval of the `prod` environment (required reviewer), then plans and applies the saved plan with `AWS_APPLY_ROLE_ARN`. That role is scoped to the `coika-*` resources and cannot modify itself or the plan role, so changes to those two (`github_oidc*.tf`) are applied from a workstation.
+- Runs are queued, never cancelled: killing Terraform halfway can leave the state locked.
 
 ## GitHub configuration (Settings > Secrets and variables > Actions)
 
 | Type | Name | Purpose |
 | --- | --- | --- |
-| Secret | `AWS_ROLE_ARN` | IAM role assumed by the workflow via OIDC |
-| Variable | `AWS_REGION` | **DR region** (same value as `dr_region` in Terraform), used for ECR and Lambda |
-| Variable | `ECR_REPOSITORY_PREFIX` | Prefix of the ECR repositories, e.g. `coika/disaster_recovery` |
-| Variable | `LAMBDA_NAME_PREFIX` | Prefix of the function names, e.g. `coika` (same as `name_prefix` in Terraform) |
+| Secret | `AWS_PLAN_ROLE_ARN` | Read-only role for `terraform plan` on PRs |
+| Secret | `AWS_APPLY_ROLE_ARN` | Role for `terraform apply` (environment `prod`) |
+| Secret | `ALERT_EMAIL` | Email that receives the alarm notifications (kept out of the public plan comment) |
+| Variable | `AWS_REGION` | **DR region** (`dr_region`) |
+| Variable | `LAMBDA_NAME_PREFIX` | `name_prefix` |
+| Variable | `ECR_REPOSITORY_PREFIX` | `ecr_prefix`, e.g. `coika/disaster_recovery` |
+| Variable | `HEALTH_CHECK_URL` | Backend health endpoint checked by `health_check` |
+| Variable | `LAMBDAS_GITHUB_SUB_PREFIX` | OIDC `sub` prefix of the lambdas repository (`lambdas_github_sub_prefix`) |
 
-The IAM role needs an OIDC trust policy for GitHub (`token.actions.githubusercontent.com`) restricted to this repository and the `main` branch, plus push permissions on the ECR repositories and `lambda:UpdateFunctionCode` / `lambda:GetFunctionConfiguration` on the functions (`arn:aws:lambda:<region>:<account-id>:function:<prefix>-*`).
+The roles trust GitHub through OIDC (`token.actions.githubusercontent.com`): the plan role trusts pull requests of this repository, the apply role its `prod` environment, and the lambdas deploy role (`coika-disaster_recovery-role`, used as `AWS_ROLE_ARN` in the lambdas repository) the `main` branch of the lambdas repository.
 
 ## License
 
 [MIT](LICENSE) (c) 2026 Alejandro Cortés Cabrejas.
-
-## Lambda environment variables
-
-- `auth_service/health_check`: `HEALTH_URL` (required), URL of the backend health endpoint.

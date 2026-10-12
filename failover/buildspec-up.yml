@@ -1,4 +1,4 @@
-# Buildspec of the `-up` CodeBuild project (see infra/codebuild.tf). It runs the Terraform of the
+# Buildspec of the `-up` CodeBuild project (see codebuild.tf). It runs the Terraform of the
 # auth service repo in the DR region. Variables (TF_VERSION, TF_ACTION, STATE_BUCKET, STATE_KEY,
 # DR_REGION and TF_VAR_*) come from the project's environment.
 #
@@ -28,6 +28,14 @@ phases:
            && ! terraform state show aws_ecr_repository.app >/dev/null 2>&1 \
            && aws ecr describe-repositories --region "${DR_REGION}" --repository-names coika/auth_service >/dev/null 2>&1; then
           terraform import -input=false aws_ecr_repository.app coika/auth_service
+        fi
+      - |
+        # The DB snapshots bucket already exists in DR: it is the replica of the primary one. Adopt it
+        # so Terraform manages it instead of failing on BucketAlreadyOwnedByYou.
+        if [ "${TF_ACTION}" = "apply" ] \
+           && ! terraform state show aws_s3_bucket.db_snapshots >/dev/null 2>&1 \
+           && aws s3api head-bucket --region "${DR_REGION}" --bucket "${DB_SNAPSHOTS_BUCKET}" >/dev/null 2>&1; then
+          terraform import -input=false aws_s3_bucket.db_snapshots "${DB_SNAPSHOTS_BUCKET}"
         fi
       - terraform plan -input=false -out=tfplan
       - if [ "${TF_ACTION}" = "apply" ]; then terraform apply -input=false tfplan; fi

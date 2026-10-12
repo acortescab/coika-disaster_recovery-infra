@@ -27,23 +27,26 @@ scripts/                       # operational utilities
 1. The `BackendHealth` alarm (fed by the `health_check` lambda) goes to `ALARM`. EventBridge emails it and starts the state machine.
 2. The state machine re-runs the health check several times (`failover_validation_attempts`, every `failover_validation_interval_seconds`). Any healthy answer ends it as a false alarm.
 3. It calls the `region_check` lambda, which probes the public endpoints of `region_probe_services` in `primary_region`. If fewer than `region_probe_failures_required` fail, only the backend is affected: the state machine emails a "local outage" notice and stops without failing over (a single host or AZ is handled where the service runs).
-4. It starts the `-up` CodeBuild project, which runs the auth service Terraform in the DR region. The mode comes from the execution: `apply` deploys; `plan` is a dry run that only runs the build with `TF_ACTION=plan` and then ends, without taking the lock, touching the state table, enabling the recovery check, calling `restore_db` or sending notifications. Executions started by the alarm use the default `failover_tf_action` (`plan`).
+4. It starts the `-up` CodeBuild project, which runs the auth service Terraform in the DR region. The build runs with `TF_ACTION=apply`: **this deploys the DR stack for real**. To check the build without creating anything, use the dry-run state machine (below).
 5. It calls the `restore_db` lambda, which restores the newest dump on the DR database host through SSM, and waits for it.
 
 While the DR region serves, the failover state (`failover_state.tf`, DynamoDB) is `DR_ACTIVE`: it records which region serves and doubles as the lock that prevents a second failover. The `primary_recovery_check` lambda (its schedule is enabled when a failover completes and disabled when a failback completes) counts consecutive healthy checks of the primary region and emails once when it looks recovered.
 
 ### Starting a failover by hand (AWS console or CLI)
 
-Start an execution of the failover state machine with an input; every field is optional:
+Start an execution of the failover state machine. The input is optional:
 
 ```json
-{ "tf_action": "apply", "skip_checks": true }
+{ "skip_checks": true }
 ```
 
-- `tf_action`: `"plan"` or `"apply"`. Overrides the default for this execution only, no Terraform apply needed. `plan` is a smoke test of the build (clone of the service repo, its state, permissions, `terraform plan`); it does not exercise the lock, the state table or the restore, so only `apply` tests those.
 - `skip_checks`: `true` goes straight to the lock and the build, without re-checking the backend or the primary region. Without it a manual run ends as a false alarm if the backend answers.
 
 The lock still applies: nothing starts if the DR region already serves or another failover is running.
+
+### Dry run (`<failover state machine>_plan`)
+
+A separate state machine, `coika-auth_service-failover_plan`, that nothing triggers: start it by hand from the console or with `aws stepfunctions start-execution`. It only runs the `-up` build with `TF_ACTION=plan` (clone of the service repo, its state in the DR region, permissions, `terraform plan`). It creates and records nothing: no lock, no state table update, no recovery check, no restore, no notifications. It does not exercise those parts of the real failover; only a real failover does.
 
 ## Failback flow
 

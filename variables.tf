@@ -57,17 +57,6 @@ variable "terraform_version" {
   default     = "1.15.5"
 }
 
-variable "failover_tf_action" {
-  description = "Default mode of a failover execution that has no `tf_action` in its input, which is the case of the ones started by the alarm. `plan` only shows the changes and leaves the primary as the active region, `apply` actually brings the service up in the DR region. An execution started by hand can override it with the input {\"tf_action\": \"apply\"} or {\"tf_action\": \"plan\"}."
-  type        = string
-  default     = "plan"
-
-  validation {
-    condition     = contains(["plan", "apply"], var.failover_tf_action)
-    error_message = "failover_tf_action must be \"plan\" or \"apply\"."
-  }
-}
-
 variable "failover_validation_attempts" {
   description = "Consecutive failed health re-checks required before the automatic failover starts. A single healthy answer cancels it as a false alarm."
   type        = number

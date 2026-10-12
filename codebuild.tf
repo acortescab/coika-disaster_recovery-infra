@@ -248,7 +248,7 @@ resource "aws_iam_role_policy" "failover" {
 locals {
   failover_projects = {
     up = {
-      description = "Brings up the auth service in the DR region (TF_ACTION=plan by default, apply to deploy)."
+      description = "Brings up the auth service in the DR region (TF_ACTION=plan by default; the failover state machine overrides it with apply, the dry-run one with plan)."
       buildspec   = "buildspec-up.yml"
       tf_action   = "plan"
     }

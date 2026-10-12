@@ -46,16 +46,18 @@ resource "aws_dynamodb_table_item" "failover_state" {
 locals {
   failover_state_key = { service = { S = "auth_service" } }
 
-  # Final failover states: record the outcome, then continue to the terminal state. A failed update
-  # must not hide the real result, so every error moves on to the same next state.
+  # Final failover states: record the outcome, then continue to the terminal state.
   #
-  # Only executions in mode `apply` get here: a `plan` is a dry run that never touches this table.
+  # A successful failover is the signal to switch the traffic, so recording it must not fail silently:
+  # if DR_ACTIVE cannot be written the execution fails (StateRecordFailed) and the traffic must not be
+  # switched. The failure paths already end in a Fail state, so a failed update there just moves on to
+  # it and the real error is not hidden.
   failover_status_updates = {
     for name, s in {
-      MarkRestored      = { status = "DR_ACTIVE", next = "EnableRecoveryCheck" }
-      MarkNoDbHost      = { status = "FAILOVER_FAILED", next = "NoDbHost" }
-      MarkBuildFailed   = { status = "FAILOVER_FAILED", next = "BuildFailed" }
-      MarkRestoreFailed = { status = "FAILOVER_FAILED", next = "RestoreFailed" }
+      MarkRestored      = { status = "DR_ACTIVE", next = "EnableRecoveryCheck", on_error = "StateRecordFailed" }
+      MarkNoDbHost      = { status = "FAILOVER_FAILED", next = "NoDbHost", on_error = "NoDbHost" }
+      MarkBuildFailed   = { status = "FAILOVER_FAILED", next = "BuildFailed", on_error = "BuildFailed" }
+      MarkRestoreFailed = { status = "FAILOVER_FAILED", next = "RestoreFailed", on_error = "RestoreFailed" }
       } : name => {
       Type     = "Task"
       Resource = "arn:aws:states:::dynamodb:updateItem"
@@ -72,8 +74,14 @@ locals {
         }
       }
       ResultPath = null
-      Catch      = [{ ErrorEquals = ["States.ALL"], ResultPath = null, Next = s.next }]
-      Next       = s.next
+      Retry = [{
+        ErrorEquals     = ["States.ALL"]
+        IntervalSeconds = 2
+        MaxAttempts     = 3
+        BackoffRate     = 2
+      }]
+      Catch = [{ ErrorEquals = ["States.ALL"], ResultPath = null, Next = s.on_error }]
+      Next  = s.next
     }
   }
 }

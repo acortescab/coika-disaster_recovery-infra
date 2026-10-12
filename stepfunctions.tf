@@ -213,6 +213,10 @@ resource "aws_sfn_state_machine" "failover" {
   name     = "${var.name_prefix}-auth_service-failover"
   role_arn = aws_iam_role.failover_sfn.arn
 
+  # Step Functions checks the permissions of the role (e.g. the managed rules of the .sync
+  # integrations) when it saves the definition, so the policy must be in place before.
+  depends_on = [aws_iam_role_policy.failover_sfn]
+
   definition = jsonencode({
     Comment        = "Confirms the backend is really down and the primary region is impaired, brings up the auth service in the DR region and restores the latest dump."
     StartAt        = "CheckFailoverState"

@@ -54,6 +54,9 @@ resource "aws_sfn_state_machine" "failover_plan" {
   name     = "${aws_sfn_state_machine.failover.name}_plan"
   role_arn = aws_iam_role.failover_plan_sfn.arn
 
+  # Step Functions checks the permissions of the role when it saves the definition.
+  depends_on = [aws_iam_role_policy.failover_plan_sfn]
+
   definition = jsonencode({
     Comment        = "Dry run of the failover build (terraform plan in the DR region). Manual only; creates and records nothing."
     StartAt        = "PlanBuild"

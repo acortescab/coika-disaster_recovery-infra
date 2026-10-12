@@ -21,12 +21,6 @@ variable "github_sub_prefix" {
   default     = "repo:acortescab@289379741/coika-disaster_recovery-infra@1414221119"
 }
 
-variable "lambdas_github_sub_prefix" {
-  description = "Same as github_sub_prefix, for the lambdas repository (coika-disaster_recovery): only its main branch can assume the role that pushes images and updates the functions. Get it with `gh api repos/<owner>/coika-disaster_recovery/actions/oidc/customization/sub`."
-  type        = string
-  default     = "repo:acortescab@289379741/coika-disaster_recovery@1415542251"
-}
-
 variable "github_apply_environment" {
   description = "GitHub environment (with required reviewers) that is allowed to assume the apply role."
   type        = string
@@ -84,6 +78,29 @@ variable "failover_validation_interval_seconds" {
   description = "Seconds to wait between the health re-checks of the failover validation."
   type        = number
   default     = 30
+}
+
+variable "primary_region" {
+  description = "Primary region (where the services run). `region_check` probes the AWS service endpoints of this region to tell a regional outage from a local one."
+  type        = string
+  default     = "eu-west-1"
+}
+
+variable "region_probe_services" {
+  description = "AWS services whose public endpoint in the primary region is probed by `region_check` (`<service>.<primary_region>.amazonaws.com`). Pick services that are independent of each other."
+  type        = list(string)
+  default     = ["sts", "ec2", "s3", "sqs"]
+}
+
+variable "region_probe_failures_required" {
+  description = "How many of the probed endpoints must fail for the primary region to be considered down. Below this the outage is treated as local and no failover starts."
+  type        = number
+  default     = 3
+
+  validation {
+    condition     = var.region_probe_failures_required >= 1 && var.region_probe_failures_required <= length(var.region_probe_services)
+    error_message = "region_probe_failures_required must be between 1 and the number of region_probe_services."
+  }
 }
 
 variable "db_instance_name" {

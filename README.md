@@ -2,7 +2,7 @@
 
 Infrastructure as code (Terraform, at the root of the repository) of the AWS disaster recovery of the Coika services. It detects that the primary backend is down, confirms it is not a false alarm, brings the auth service up in the DR region and restores its database.
 
-The lambdas it uses live in the sibling repository **coika-disaster_recovery** (code, tests, image build and deploy). This repo creates their ECR repositories, functions and permissions, and wires them into the failover.
+The lambdas it uses live in the sibling repository **coika-disaster_recovery** (code, tests, image build and deploy). That repo also creates their ECR repositories (`terraform/` there). This repo creates the functions (execution role, log group, environment, permissions) from the images it pushes, and wires them into the failover.
 
 ## Structure
 
@@ -12,8 +12,8 @@ alarms.tf, notifications.tf    # BackendHealth alarm -> EventBridge -> SNS email
 stepfunctions.tf               # alarm -> EventBridge -> failover state machine
 codebuild.tf, failover/        # `-up` / `-down` builds that run the auth service stack in the DR region
 service_state.tf               # DR bucket with the Terraform state of the auth service
-github_oidc*.tf                # AWS roles for the GitHub workflows (plan, apply, lambdas deploy)
-modules/lambda_container/      # ECR repository + role + log group + function (container image)
+github_oidc*.tf                # AWS roles for the GitHub workflows of this repo (plan, apply)
+modules/lambda_container/      # role + log group + function (container image); looks up the ECR repository
 variables.tf, versions.tf, outputs.tf, terraform.tfvars.example
 docs/runbooks/                 # step-by-step recovery procedures
 scripts/                       # operational utilities
@@ -24,8 +24,9 @@ scripts/                       # operational utilities
 
 1. The `BackendHealth` alarm (fed by the `health_check` lambda) goes to `ALARM`. EventBridge emails it and starts the state machine.
 2. The state machine re-runs the health check several times (`failover_validation_attempts`, every `failover_validation_interval_seconds`). Any healthy answer ends it as a false alarm.
-3. It starts the `-up` CodeBuild project, which runs the auth service Terraform in the DR region. With `failover_tf_action = "plan"` (default) it only shows the changes; set `"apply"` to deploy.
-4. It calls the `restore_db` lambda, which restores the newest dump on the DR database host through SSM, and waits for it.
+3. It calls the `region_check` lambda, which probes the public endpoints of `region_probe_services` in `primary_region`. If fewer than `region_probe_failures_required` fail, only the backend is affected: the state machine emails a "local outage" notice and stops without failing over (a single host or AZ is handled where the service runs).
+4. It starts the `-up` CodeBuild project, which runs the auth service Terraform in the DR region. With `failover_tf_action = "plan"` (default) it only shows the changes; set `"apply"` to deploy.
+5. It calls the `restore_db` lambda, which restores the newest dump on the DR database host through SSM, and waits for it.
 
 `-down` (destroys the auth service in DR, keeping the ECR repository and the DB snapshots bucket) is started by hand, after the DNS points back to the primary region.
 
@@ -43,17 +44,15 @@ Single-AZ failures are not handled here: they are absorbed by the services thems
 
 `main.tf` has one `module "lambda_container"` call per lambda in the lambdas repository; the module name and the folder names must match (`<prefix>-<service>-<name>` for the function, `<ecr_prefix>/<service>/<name>` for the repository). The lambdas repository builds and pushes the images and runs `aws lambda update-function-code`, so Terraform only manages infrastructure (it ignores `image_uri` changes).
 
-First deployment (a function needs an image in ECR before it can be created):
+The ECR repositories are created by the lambdas repository, not here: the module only looks them up (`data "aws_ecr_repository"`) and checks that the `image_tag` image exists (`data "aws_ecr_image"`), so the plan fails with a clear error if the repository or the first image is missing.
 
-```powershell
-copy terraform.tfvars.example terraform.tfvars   # edit the values
-terraform init
-terraform apply -target=module.auth_service_health_check.aws_ecr_repository.this -target=module.auth_service_restore_db.aws_ecr_repository.this
-# in the lambdas repository: merge to main (or docker build/push by hand with the `latest` tag)
-terraform apply
-```
+Adding a lambda, in this order:
 
-Adding a lambda: add the folder in the lambdas repository, add its `module` call here and apply **before** merging there.
+1. Lambdas repository: add the folder and its `module "ecr_repository"` call, and apply it (creates the repository).
+2. Lambdas repository: merge to `main`; its CD pushes the first image (the `update-function-code` step is skipped while the function does not exist).
+3. This repo: add the `module "lambda_container"` call and apply it (creates the function from that image).
+
+Migration note: the module used to create the repositories. Its `removed` blocks forget them without destroying them; apply the lambdas repository first (it imports them), apply this repo, then delete the `removed` blocks.
 
 ## CI / CD
 
@@ -72,9 +71,8 @@ Adding a lambda: add the folder in the lambdas repository, add its `module` call
 | Variable | `LAMBDA_NAME_PREFIX` | `name_prefix` |
 | Variable | `ECR_REPOSITORY_PREFIX` | `ecr_prefix`, e.g. `coika/disaster_recovery` |
 | Variable | `HEALTH_CHECK_URL` | Backend health endpoint checked by `health_check` |
-| Variable | `LAMBDAS_GITHUB_SUB_PREFIX` | OIDC `sub` prefix of the lambdas repository (`lambdas_github_sub_prefix`) |
 
-The roles trust GitHub through OIDC (`token.actions.githubusercontent.com`): the plan role trusts pull requests of this repository, the apply role its `prod` environment, and the lambdas deploy role (`coika-disaster_recovery-role`, used as `AWS_ROLE_ARN` in the lambdas repository) the `main` branch of the lambdas repository.
+The roles trust GitHub through OIDC (`token.actions.githubusercontent.com`): the plan role trusts pull requests of this repository, the apply role its `prod` environment. The lambdas repository has its own roles (created by its own Terraform).
 
 ## License
 

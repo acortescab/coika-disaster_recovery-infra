@@ -4,31 +4,35 @@ locals {
 }
 
 # ---------------------------------------------------------------- ECR
+# The repository is created by the lambdas repository (coika-disaster_recovery, terraform/), which
+# also pushes the images. It must exist, with an image under `image_tag`, before this module is
+# applied: a function from an image cannot be created otherwise.
 
-resource "aws_ecr_repository" "this" {
-  name                 = local.repository_name
-  image_tag_mutability = "MUTABLE" # CI also pushes a moving `latest` tag
+data "aws_ecr_repository" "this" {
+  name = local.repository_name
+}
 
-  image_scanning_configuration {
-    scan_on_push = true
+data "aws_ecr_image" "this" {
+  repository_name = data.aws_ecr_repository.this.name
+  image_tag       = var.image_tag
+}
+
+# The repository and its lifecycle policy used to be defined here. Forget them without destroying
+# them (the lambdas repository imports and owns them now); delete these blocks once applied.
+removed {
+  from = aws_ecr_repository.this
+
+  lifecycle {
+    destroy = false
   }
 }
 
-resource "aws_ecr_lifecycle_policy" "this" {
-  repository = aws_ecr_repository.this.name
+removed {
+  from = aws_ecr_lifecycle_policy.this
 
-  policy = jsonencode({
-    rules = [{
-      rulePriority = 1
-      description  = "Keep the last ${var.ecr_images_to_keep} images"
-      selection = {
-        tagStatus   = "any"
-        countType   = "imageCountMoreThan"
-        countNumber = var.ecr_images_to_keep
-      }
-      action = { type = "expire" }
-    }]
-  })
+  lifecycle {
+    destroy = false
+  }
 }
 
 # ---------------------------------------------------------------- IAM
@@ -96,7 +100,7 @@ resource "aws_lambda_function" "this" {
   function_name = local.function_name
   role          = aws_iam_role.this.arn
   package_type  = "Image"
-  image_uri     = "${aws_ecr_repository.this.repository_url}:${var.image_tag}"
+  image_uri     = "${data.aws_ecr_repository.this.repository_url}:${var.image_tag}"
   architectures = ["x86_64"]
   timeout       = var.timeout
   memory_size   = var.memory_size
@@ -112,6 +116,7 @@ resource "aws_lambda_function" "this" {
   depends_on = [
     aws_cloudwatch_log_group.this,
     aws_iam_role_policy_attachment.logs,
+    data.aws_ecr_image.this,
   ]
 
   # New images are rolled out by CI (aws lambda update-function-code),

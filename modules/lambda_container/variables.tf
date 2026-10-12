@@ -4,7 +4,7 @@ variable "name_prefix" {
 }
 
 variable "ecr_prefix" {
-  description = "Prefix of the ECR repository name (slashes allowed). Must match ECR_REPOSITORY_PREFIX in GitHub."
+  description = "Prefix of the ECR repository name (slashes allowed), created by the lambdas repository. Must match ECR_REPOSITORY_PREFIX in GitHub."
   type        = string
 }
 
@@ -19,7 +19,7 @@ variable "name" {
 }
 
 variable "image_tag" {
-  description = "Image tag used when the function is first created. Later rollouts are done by CI."
+  description = "Image tag the function is first created from; it must already be pushed to ECR by the lambdas repository CD. Later rollouts are done by CI."
   type        = string
   default     = "latest"
 }
@@ -63,10 +63,4 @@ variable "memory_size" {
 variable "log_retention_days" {
   type    = number
   default = 30
-}
-
-variable "ecr_images_to_keep" {
-  description = "Number of images kept in the ECR repository."
-  type        = number
-  default     = 10
 }

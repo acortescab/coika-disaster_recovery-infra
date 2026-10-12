@@ -102,8 +102,37 @@ data "aws_iam_policy_document" "github_apply_permissions" {
     condition {
       test     = "StringEquals"
       variable = "iam:PassedToService"
-      values   = ["lambda.amazonaws.com", "codebuild.amazonaws.com"]
+      values   = ["lambda.amazonaws.com", "codebuild.amazonaws.com", "states.amazonaws.com"]
     }
+  }
+
+  # --- State machines (failover, failback) and their log groups
+  statement {
+    actions   = ["states:*"]
+    resources = ["arn:aws:states:${var.dr_region}:${local.account_id}:stateMachine:${var.name_prefix}-*"]
+  }
+
+  statement {
+    actions = ["logs:*"]
+    resources = [
+      "arn:aws:logs:${var.dr_region}:${local.account_id}:log-group:/aws/vendedlogs/states/${var.name_prefix}-*",
+      "arn:aws:logs:${var.dr_region}:${local.account_id}:log-group:/aws/vendedlogs/states/${var.name_prefix}-*:*",
+    ]
+  }
+
+  # Log delivery of a state machine; these actions do not support resource-level scoping.
+  statement {
+    actions = [
+      "logs:CreateLogDelivery",
+      "logs:GetLogDelivery",
+      "logs:UpdateLogDelivery",
+      "logs:DeleteLogDelivery",
+      "logs:ListLogDeliveries",
+      "logs:PutResourcePolicy",
+      "logs:DescribeResourcePolicies",
+      "logs:DescribeLogGroups",
+    ]
+    resources = ["*"]
   }
 
   # --- Failover CodeBuild project
@@ -174,6 +203,11 @@ data "aws_iam_policy_document" "github_apply_permissions" {
       "events:UntagResource",
     ]
     resources = ["arn:aws:events:${var.dr_region}:${local.account_id}:rule/${var.name_prefix}-*"]
+  }
+
+  statement {
+    actions   = ["dynamodb:*"]
+    resources = ["arn:aws:dynamodb:${var.dr_region}:${local.account_id}:table/${var.name_prefix}-*"]
   }
 
   statement {

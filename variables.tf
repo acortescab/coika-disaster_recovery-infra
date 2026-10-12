@@ -103,6 +103,36 @@ variable "region_probe_failures_required" {
   }
 }
 
+variable "primary_recovery_interval_minutes" {
+  description = "How often `primary_recovery_check` probes the primary region while the DR region serves."
+  type        = number
+  default     = 5
+}
+
+variable "primary_recovery_threshold" {
+  description = "Consecutive healthy runs of `primary_recovery_check` before it notifies that a failback is possible (interval x threshold = time the primary must stay healthy)."
+  type        = number
+  default     = 12
+}
+
+variable "primary_recovery_health_url" {
+  description = "Health endpoint of the backend in the PRIMARY region, also checked by `primary_recovery_check`. It must reach the primary backend directly, not a DNS name that now points to the DR region. Empty means only the AWS service endpoints of the primary region are probed."
+  type        = string
+  default     = ""
+}
+
+variable "failback_approval_timeout_seconds" {
+  description = "How long the failback state machine waits for each manual confirmation (writes stopped in DR; traffic switched to the primary). On timeout the failback is aborted and the DR region keeps serving."
+  type        = number
+  default     = 86400
+}
+
+variable "failback_teardown_dr" {
+  description = "Whether the failback state machine also runs the `-down` build to destroy the auth service in the DR region once traffic is back on the primary. When false it only notifies, and `-down` is started by hand."
+  type        = bool
+  default     = false
+}
+
 variable "db_instance_name" {
   description = "Name tag of the database EC2 instance of the auth service stack (its `db_instance_name`). The failover finds the DB host by it."
   type        = string

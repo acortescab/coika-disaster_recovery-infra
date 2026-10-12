@@ -21,6 +21,44 @@ module "auth_service_restore_db" {
       resources = ["*"]
     },
     {
+      # The failback also restores into the DB host of the primary region.
+      actions = ["ssm:SendCommand"]
+      resources = [
+        "arn:aws:ssm:${var.dr_region}::document/AWS-RunShellScript",
+        "arn:aws:ec2:${var.dr_region}:${local.account_id}:instance/*",
+        "arn:aws:ssm:${var.primary_region}::document/AWS-RunShellScript",
+        "arn:aws:ec2:${var.primary_region}:${local.account_id}:instance/*",
+      ]
+    },
+    {
+      actions   = ["ssm:GetCommandInvocation"]
+      resources = ["*"]
+    },
+  ]
+}
+
+# Dumps the DB of the DR host and returns the key of the dump (called by the failback state machine);
+# the snapshots bucket replicates it to the primary region.
+module "auth_service_backup_db" {
+  source = "./modules/lambda_container"
+
+  name_prefix = var.name_prefix
+  ecr_prefix  = var.ecr_prefix
+  service     = "auth_service"
+  name        = "backup_db"
+
+  timeout = 900 # the state machine calls it again while the backup is still running
+
+  environment = {
+    DB_INSTANCE_NAME = var.db_instance_name
+  }
+
+  policy_statements = [
+    {
+      actions   = ["ec2:DescribeInstances"]
+      resources = ["*"]
+    },
+    {
       actions = ["ssm:SendCommand"]
       resources = [
         "arn:aws:ssm:${var.dr_region}::document/AWS-RunShellScript",

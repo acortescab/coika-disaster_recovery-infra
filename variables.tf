@@ -121,6 +121,18 @@ variable "primary_recovery_health_url" {
   default     = ""
 }
 
+variable "failback_approval_timeout_seconds" {
+  description = "How long the failback state machine waits for each manual confirmation (writes stopped in DR; traffic switched to the primary). On timeout the failback is aborted and the DR region keeps serving."
+  type        = number
+  default     = 86400
+}
+
+variable "failback_teardown_dr" {
+  description = "Whether the failback state machine also runs the `-down` build to destroy the auth service in the DR region once traffic is back on the primary. When false it only notifies, and `-down` is started by hand."
+  type        = bool
+  default     = false
+}
+
 variable "db_instance_name" {
   description = "Name tag of the database EC2 instance of the auth service stack (its `db_instance_name`). The failover finds the DB host by it."
   type        = string

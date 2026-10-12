@@ -113,34 +113,6 @@ locals {
       Next           = "StartRestore"
     }
 
-    # Dry run (mode `plan`): only checks that the build can clone the service repo, reach its state and
-    # produce a plan. Nothing is created and nothing is recorded: no lock, no state table update, no
-    # recovery check, no restore.
-    PlanBuild = {
-      Type     = "Task"
-      Resource = "arn:aws:states:::codebuild:startBuild.sync"
-      Parameters = {
-        ProjectName = aws_codebuild_project.failover["up"].name
-        EnvironmentVariablesOverride = [
-          { Name = "TF_ACTION", Value = "plan", Type = "PLAINTEXT" },
-        ]
-      }
-      ResultPath = null
-      Catch      = [{ ErrorEquals = ["States.ALL"], ResultPath = "$.buildError", Next = "PlanFailed" }]
-      Next       = "PlanDone"
-    }
-
-    PlanDone = {
-      Type    = "Succeed"
-      Comment = "Dry run: the build produced a plan. Nothing was created or recorded."
-    }
-
-    PlanFailed = {
-      Type  = "Fail"
-      Error = "PlanBuildFailed"
-      Cause = "The dry-run build did not finish successfully; see the build logs. Nothing was created or recorded."
-    }
-
     BuildFailed = {
       Type  = "Fail"
       Error = "FailoverBuildFailed"
@@ -226,43 +198,13 @@ resource "aws_sfn_state_machine" "failover" {
 
   definition = jsonencode({
     Comment        = "Confirms the backend is really down and the primary region is impaired, brings up the auth service in the DR region and restores the latest dump."
-    StartAt        = "ModeInput"
+    StartAt        = "CheckFailoverState"
     TimeoutSeconds = 10800
     States = merge(local.failover_states, {
-      # Input of the execution (all optional; the alarm sends none of them):
-      #   tf_action    "plan" | "apply"  mode of the failover, default var.failover_tf_action
-      #   skip_checks  true              start the failover without re-checking the backend and the region
-      #                                  (for a drill or a failover decided by a person)
-      ModeInput = {
-        Type = "Choice"
-        Choices = [
-          {
-            And = [
-              { Variable = "$.tf_action", IsPresent = true },
-              { Not = { Variable = "$.tf_action", StringEquals = "plan" } },
-              { Not = { Variable = "$.tf_action", StringEquals = "apply" } },
-            ]
-            Next = "InvalidMode"
-          },
-          { Variable = "$.tf_action", IsPresent = true, Next = "CheckFailoverState" },
-        ]
-        Default = "DefaultMode"
-      }
-
-      InvalidMode = {
-        Type  = "Fail"
-        Error = "InvalidMode"
-        Cause = "tf_action must be \"plan\" or \"apply\"."
-      }
-
-      # Keeps the rest of the input (skip_checks) and adds the default mode.
-      DefaultMode = {
-        Type       = "Pass"
-        Result     = var.failover_tf_action
-        ResultPath = "$.tf_action"
-        Next       = "CheckFailoverState"
-      }
-
+      # Optional input of a manual execution (the alarm sends none):
+      #   skip_checks  true   start the failover without re-checking the backend and the region
+      #                       (a failover decided by a person)
+      #
       # Cheap early exit when the DR region already serves, so a repeated alarm neither re-runs the
       # checks nor sends a misleading "local outage" email. The real lock is AcquireFailoverLock; a
       # failed read here just continues.
@@ -290,22 +232,14 @@ resource "aws_sfn_state_machine" "failover" {
         Type = "Choice"
         Choices = [{
           And  = [{ Variable = "$.skip_checks", IsPresent = true }, { Variable = "$.skip_checks", BooleanEquals = true }]
-          Next = "ModeBeforeLock"
+          Next = "AcquireFailoverLock"
         }]
         Default = "InitChecks"
       }
 
-      # The point of no return for the bookkeeping: `apply` takes the lock and records the failover,
-      # `plan` is a dry run and only runs the build.
-      ModeBeforeLock = {
-        Type    = "Choice"
-        Choices = [{ Variable = "$.tf_action", StringEquals = "apply", Next = "AcquireFailoverLock" }]
-        Default = "PlanBuild"
-      }
-
       InitChecks = {
         Type       = "Pass"
-        Parameters = { attempt = 0, "tf_action.$" = "$.tf_action" }
+        Parameters = { attempt = 0 }
         Next       = "CheckHealth"
       }
 
@@ -337,7 +271,7 @@ resource "aws_sfn_state_machine" "failover" {
 
       CountAttempt = {
         Type       = "Pass"
-        Parameters = { "attempt.$" = "States.MathAdd($.attempt, 1)", "tf_action.$" = "$.tf_action" }
+        Parameters = { "attempt.$" = "States.MathAdd($.attempt, 1)" }
         Next       = "MoreChecks"
       }
 
@@ -374,15 +308,8 @@ resource "aws_sfn_state_machine" "failover" {
 
       EvaluateRegion = {
         Type    = "Choice"
-        Choices = [{ Variable = "$.region.down", BooleanEquals = true, Next = "ModeBeforeLock" }]
-        Default = "ModeOnLocalOutage"
-      }
-
-      # A dry run (plan) sends no notifications.
-      ModeOnLocalOutage = {
-        Type    = "Choice"
-        Choices = [{ Variable = "$.tf_action", StringEquals = "apply", Next = "NotifyLocalOutage" }]
-        Default = "LocalOutage"
+        Choices = [{ Variable = "$.region.down", BooleanEquals = true, Next = "AcquireFailoverLock" }]
+        Default = "NotifyLocalOutage"
       }
 
       # Records that a failover is running. The condition makes it a lock: if the DR region already

@@ -102,7 +102,8 @@ module "auth_service_primary_recovery_check" {
   name        = "primary_recovery_check"
 
   # The rule is created DISABLED: the failover state machine enables it once the DR region serves and
-  # disables it when a failover starts (Terraform ignores the rule state afterwards).
+  # the failback state machine disables it when the primary serves again (Terraform ignores the rule
+  # state afterwards).
   schedule_expression = "rate(${var.primary_recovery_interval_minutes} minutes)"
   schedule_enabled    = false
 

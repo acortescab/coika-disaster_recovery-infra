@@ -30,20 +30,20 @@ scripts/                       # operational utilities
 4. It starts the `-up` CodeBuild project, which runs the auth service Terraform in the DR region. With `failover_tf_action = "plan"` (default) it only shows the changes; set `"apply"` to deploy.
 5. It calls the `restore_db` lambda, which restores the newest dump on the DR database host through SSM, and waits for it.
 
-While the DR region serves, the failover state (`failover_state.tf`, DynamoDB) is `DR_ACTIVE`: it records which region serves and doubles as the lock that prevents a second failover. The `primary_recovery_check` lambda (its schedule is enabled by the failover and disabled when a failover or failback starts) counts consecutive healthy checks of the primary region and emails once when it looks recovered.
+While the DR region serves, the failover state (`failover_state.tf`, DynamoDB) is `DR_ACTIVE`: it records which region serves and doubles as the lock that prevents a second failover. The `primary_recovery_check` lambda (its schedule is enabled when a failover completes and disabled when a failback completes) counts consecutive healthy checks of the primary region and emails once when it looks recovered.
 
 ## Failback flow
 
 Started by hand (`aws stepfunctions start-execution --state-machine-arn <failback_state_machine_arn>`); see the header of `failback.tf`. It assumes the primary stack is still deployed.
 
-1. Takes the lock (`DR_ACTIVE` -> `FAILING_BACK`; anything else is refused), turns the recovery check off and probes the primary region once more.
+1. Takes the lock (`DR_ACTIVE` -> `FAILING_BACK`; anything else is refused) and probes the primary region once more.
 2. Emails a task token and waits for you to stop the writes in DR (put the API in maintenance), so the dump is complete.
 3. `backup_db` dumps the DR database; the snapshots bucket replicates it to the primary region.
 4. `restore_db` (with `region`, `key` and `overwrite`) restores that dump over the database of the primary host once it has been replicated.
 5. Emails a second task token and waits for you to start the API in the primary, switch the DNS and confirm.
-6. Sets the state to `PRIMARY`. With `failback_teardown_dr = true` it then runs the `-down` build; by default it only notifies and `-down` (destroys the auth service in DR, keeping the ECR repository and the DB snapshots bucket) is started by hand.
+6. Sets the state to `PRIMARY` and turns the recovery check off. With `failback_teardown_dr = true` it then runs the `-down` build; by default it only notifies and `-down` (destroys the auth service in DR, keeping the ECR repository and the DB snapshots bucket) is started by hand.
 
-Cancelling (`send-task-failure`), a failure or a timeout before step 6 aborts the failback: the state goes back to `DR_ACTIVE`, the recovery check is turned on again and the DR region keeps serving. Remember to start the DR API again if you stopped it.
+Cancelling (`send-task-failure`), a failure or a timeout before step 6 aborts the failback: the state goes back to `DR_ACTIVE` (the recovery check keeps running, with its counter reset) and the DR region keeps serving. Remember to start the DR API again if you stopped it.
 
 ## Region strategy
 

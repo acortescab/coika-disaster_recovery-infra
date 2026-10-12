@@ -63,8 +63,10 @@ module "auth_service_primary_recovery_check" {
   service     = "auth_service"
   name        = "primary_recovery_check"
 
-  # Disabled while the process is started by hand: uncomment to run it on a schedule.
-  # schedule_expression = "rate(${var.primary_recovery_interval_minutes} minutes)"
+  # The rule is created DISABLED: the failover state machine enables it once the DR region serves and
+  # disables it when a failover starts (Terraform ignores the rule state afterwards).
+  schedule_expression = "rate(${var.primary_recovery_interval_minutes} minutes)"
+  schedule_enabled    = false
 
   timeout = 30 # the probes run in parallel, each with its own short timeout
 

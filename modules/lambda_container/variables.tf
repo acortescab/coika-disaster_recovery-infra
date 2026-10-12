@@ -50,6 +50,12 @@ variable "schedule_expression" {
   default     = null
 }
 
+variable "schedule_enabled" {
+  description = "Initial state of the schedule rule. Terraform ignores the state afterwards, so something else (e.g. a state machine) can enable and disable the rule."
+  type        = bool
+  default     = true
+}
+
 variable "timeout" {
   type    = number
   default = 10

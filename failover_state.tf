@@ -53,7 +53,8 @@ locals {
   # must not hide the real result, so every error moves on to the same next state.
   failover_status_updates = {
     for name, s in {
-      MarkRestored      = { status = local.failover_success_status, next = "Restored" }
+      # Only a real failover (apply) leaves the DR region serving and needs the recovery check.
+      MarkRestored      = { status = local.failover_success_status, next = var.failover_tf_action == "apply" ? "EnableRecoveryCheck" : "Restored" }
       MarkNoDbHost      = { status = var.failover_tf_action == "apply" ? "FAILOVER_FAILED" : "PRIMARY", next = "NoDbHost" }
       MarkBuildFailed   = { status = "FAILOVER_FAILED", next = "BuildFailed" }
       MarkRestoreFailed = { status = "FAILOVER_FAILED", next = "RestoreFailed" }

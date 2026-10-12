@@ -134,6 +134,12 @@ resource "aws_cloudwatch_event_rule" "schedule" {
   name                = "${local.function_name}-schedule"
   description         = "Runs ${local.function_name} on a schedule."
   schedule_expression = var.schedule_expression
+  state               = var.schedule_enabled ? "ENABLED" : "DISABLED"
+
+  # Enabling/disabling the rule at runtime is not drift.
+  lifecycle {
+    ignore_changes = [state]
+  }
 }
 
 resource "aws_cloudwatch_event_target" "schedule" {

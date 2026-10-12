@@ -177,6 +177,11 @@ data "aws_iam_policy_document" "github_apply_permissions" {
   }
 
   statement {
+    actions   = ["dynamodb:*"]
+    resources = ["arn:aws:dynamodb:${var.dr_region}:${local.account_id}:table/${var.name_prefix}-*"]
+  }
+
+  statement {
     actions   = ["sns:*"]
     resources = ["arn:aws:sns:${var.dr_region}:${local.account_id}:${var.name_prefix}-*"]
   }

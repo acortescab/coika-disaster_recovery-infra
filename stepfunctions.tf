@@ -50,6 +50,18 @@ data "aws_iam_policy_document" "failover_sfn" {
     resources = [aws_sns_topic.alerts.arn]
   }
 
+  statement {
+    actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
+    resources = [aws_dynamodb_table.failover_state.arn]
+  }
+
+  # Lets a new execution tell whether the one that holds the failover lock is still running. The ARN is
+  # built by hand: referencing the state machine here would make the role and the state machine depend on each other.
+  statement {
+    actions   = ["states:DescribeExecution"]
+    resources = ["arn:aws:states:${var.dr_region}:${local.account_id}:execution:${var.name_prefix}-auth_service-failover:*"]
+  }
+
   # Managed rule that Step Functions creates to wait for the build (.sync integration).
   statement {
     actions   = ["events:PutTargets", "events:PutRule", "events:DescribeRule"]
@@ -91,7 +103,14 @@ locals {
       }
       ResultSelector = { "status.$" = "$.Build.BuildStatus", "arn.$" = "$.Build.Arn" }
       ResultPath     = "$.build"
+      Catch          = [{ ErrorEquals = ["States.ALL"], ResultPath = "$.buildError", Next = "MarkBuildFailed" }]
       Next           = "StartRestore"
+    }
+
+    BuildFailed = {
+      Type  = "Fail"
+      Error = "FailoverBuildFailed"
+      Cause = "The failover build did not finish successfully; see the build logs. The failover state is FAILOVER_FAILED, so a new failover may start."
     }
 
     StartRestore = {
@@ -126,18 +145,18 @@ locals {
         IntervalSeconds = 2
         MaxAttempts     = 3
       }]
-      Catch = [{ ErrorEquals = ["States.ALL"], ResultPath = "$.restoreError", Next = "RestoreFailed" }]
+      Catch = [{ ErrorEquals = ["States.ALL"], ResultPath = "$.restoreError", Next = "MarkRestoreFailed" }]
       Next  = "EvaluateRestore"
     }
 
     EvaluateRestore = {
       Type = "Choice"
       Choices = [
-        { Variable = "$.restore.status", StringEquals = "Success", Next = "Restored" },
+        { Variable = "$.restore.status", StringEquals = "Success", Next = "MarkRestored" },
         { Variable = "$.restore.status", StringEquals = "InProgress", Next = "RestoreDb" },
-        { Variable = "$.restore.status", StringEquals = "NoHost", Next = "NoDbHost" },
+        { Variable = "$.restore.status", StringEquals = "NoHost", Next = "MarkNoDbHost" },
       ]
-      Default = "RestoreFailed"
+      Default = "MarkRestoreFailed"
     }
 
     # With plan nothing is created, so the absence of a host is expected; with apply it is an error.
@@ -163,9 +182,32 @@ resource "aws_sfn_state_machine" "failover" {
 
   definition = jsonencode({
     Comment        = "Confirms the backend is really down and the primary region is impaired, brings up the auth service in the DR region and restores the latest dump."
-    StartAt        = "InitChecks"
+    StartAt        = "CheckFailoverState"
     TimeoutSeconds = 10800
     States = merge(local.failover_states, {
+      # Cheap early exit when the DR region already serves, so a repeated alarm neither re-runs the
+      # checks nor sends a misleading "local outage" email. The real lock is AcquireFailoverLock; a
+      # failed read here just continues.
+      CheckFailoverState = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::dynamodb:getItem"
+        Parameters = {
+          TableName      = aws_dynamodb_table.failover_state.name
+          Key            = local.failover_state_key
+          ConsistentRead = true
+        }
+        ResultSelector = { "status.$" = "$.Item.status.S" }
+        ResultPath     = "$.state"
+        Catch          = [{ ErrorEquals = ["States.ALL"], ResultPath = null, Next = "InitChecks" }]
+        Next           = "EvaluateFailoverState"
+      }
+
+      EvaluateFailoverState = {
+        Type    = "Choice"
+        Choices = [{ Variable = "$.state.status", StringEquals = "DR_ACTIVE", Next = "FailoverAlreadyActive" }]
+        Default = "InitChecks"
+      }
+
       InitChecks = {
         Type       = "Pass"
         Parameters = { attempt = 0 }
@@ -237,8 +279,116 @@ resource "aws_sfn_state_machine" "failover" {
 
       EvaluateRegion = {
         Type    = "Choice"
-        Choices = [{ Variable = "$.region.down", BooleanEquals = true, Next = "StartFailoverBuild" }]
+        Choices = [{ Variable = "$.region.down", BooleanEquals = true, Next = "AcquireFailoverLock" }]
         Default = "NotifyLocalOutage"
+      }
+
+      # Records that a failover is running. The condition makes it a lock: if the DR region already
+      # serves (or another execution is failing over) nothing else is started.
+      AcquireFailoverLock = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::dynamodb:updateItem"
+        Parameters = {
+          TableName                = aws_dynamodb_table.failover_state.name
+          Key                      = local.failover_state_key
+          UpdateExpression         = "SET #s = :new, updated_at = :now, execution_arn = :exec"
+          ConditionExpression      = "#s IN (:primary, :failed)"
+          ExpressionAttributeNames = { "#s" = "status" }
+          ExpressionAttributeValues = {
+            ":new"     = { S = "FAILING_OVER" }
+            ":primary" = { S = "PRIMARY" }
+            ":failed"  = { S = "FAILOVER_FAILED" }
+            ":now"     = { "S.$" = "$$.State.EnteredTime" }
+            ":exec"    = { "S.$" = "$$.Execution.Id" }
+          }
+        }
+        ResultPath = null
+        Catch = [
+          { ErrorEquals = ["DynamoDB.ConditionalCheckFailedException"], ResultPath = null, Next = "ReadFailoverState" },
+          { ErrorEquals = ["States.ALL"], ResultPath = "$.lockError", Next = "FailoverStateError" },
+        ]
+        Next = "StartFailoverBuild"
+      }
+
+      # The lock is taken. If it is a failover in progress, check that its execution is really alive: an
+      # execution that timed out or was aborted never reached the final states and would hold the lock forever.
+      ReadFailoverState = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::dynamodb:getItem"
+        Parameters = {
+          TableName      = aws_dynamodb_table.failover_state.name
+          Key            = local.failover_state_key
+          ConsistentRead = true
+        }
+        ResultSelector = { "status.$" = "$.Item.status.S", "execution_arn.$" = "$.Item.execution_arn.S" }
+        ResultPath     = "$.lock"
+        Catch          = [{ ErrorEquals = ["States.ALL"], ResultPath = "$.lockError", Next = "FailoverStateError" }]
+        Next           = "EvaluateLock"
+      }
+
+      EvaluateLock = {
+        Type    = "Choice"
+        Choices = [{ Variable = "$.lock.status", StringEquals = "FAILING_OVER", Next = "DescribeLockOwner" }]
+        Default = "FailoverAlreadyActive"
+      }
+
+      DescribeLockOwner = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::aws-sdk:sfn:describeExecution"
+        Parameters = {
+          "ExecutionArn.$" = "$.lock.execution_arn"
+        }
+        ResultSelector = { "status.$" = "$.Status" }
+        ResultPath     = "$.owner"
+        Catch = [
+          # Too old to be described: certainly not running.
+          { ErrorEquals = ["Sfn.ExecutionDoesNotExistException"], ResultPath = null, Next = "TakeOverLock" },
+          # Cannot prove it is dead: leave the lock alone.
+          { ErrorEquals = ["States.ALL"], ResultPath = null, Next = "FailoverAlreadyActive" },
+        ]
+        Next = "EvaluateLockOwner"
+      }
+
+      EvaluateLockOwner = {
+        Type    = "Choice"
+        Choices = [{ Variable = "$.owner.status", StringEquals = "RUNNING", Next = "FailoverAlreadyActive" }]
+        Default = "TakeOverLock"
+      }
+
+      # Compare-and-swap on the dead execution's ARN, so two new executions cannot both take it over.
+      TakeOverLock = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::dynamodb:updateItem"
+        Parameters = {
+          TableName                = aws_dynamodb_table.failover_state.name
+          Key                      = local.failover_state_key
+          UpdateExpression         = "SET updated_at = :now, execution_arn = :exec"
+          ConditionExpression      = "#s = :failing AND execution_arn = :old"
+          ExpressionAttributeNames = { "#s" = "status" }
+          ExpressionAttributeValues = {
+            ":failing" = { S = "FAILING_OVER" }
+            ":old"     = { "S.$" = "$.lock.execution_arn" }
+            ":now"     = { "S.$" = "$$.State.EnteredTime" }
+            ":exec"    = { "S.$" = "$$.Execution.Id" }
+          }
+        }
+        ResultPath = null
+        Catch = [
+          { ErrorEquals = ["DynamoDB.ConditionalCheckFailedException"], ResultPath = null, Next = "FailoverAlreadyActive" },
+          { ErrorEquals = ["States.ALL"], ResultPath = "$.lockError", Next = "FailoverStateError" },
+        ]
+        Next = "StartFailoverBuild"
+      }
+
+      FailoverAlreadyActive = {
+        Type    = "Succeed"
+        Comment = "A failover is already running or the DR region already serves: nothing to do."
+      }
+
+      FailoverStateError = {
+        Type  = "Fail"
+        Error = "FailoverStateUnavailable"
+        Cause = "The failover state table could not be updated, so no failover was started."
       }
 
       NotifyLocalOutage = {
@@ -286,7 +436,7 @@ resource "aws_sfn_state_machine" "failover" {
         Error = "HealthCheckFailed"
         Cause = "The health check lambda failed, so the outage could not be confirmed. No failover was started."
       }
-    })
+    }, local.failover_status_updates)
   })
 
   logging_configuration {

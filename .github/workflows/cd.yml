@@ -23,8 +23,97 @@ env:
   TF_VERSION: "1.15.5"
 
 jobs:
+  # Runs before the approval: the reviewer reads this plan (job summary) and then approves the apply
+  # job, which applies exactly this plan.
+  terraform-plan:
+    name: Terraform plan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      exitcode: ${{ steps.plan.outputs.exitcode }}
+    env:
+      TF_IN_AUTOMATION: "true"
+      TF_VAR_dr_region: ${{ vars.AWS_REGION }}
+      TF_VAR_name_prefix: ${{ vars.LAMBDA_NAME_PREFIX }}
+      TF_VAR_ecr_prefix: ${{ vars.ECR_REPOSITORY_PREFIX }}
+      TF_VAR_health_check_url: ${{ vars.HEALTH_CHECK_URL }}
+      TF_VAR_alert_email: ${{ secrets.ALERT_EMAIL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      # Read-only role: it cannot change anything, so no approval is needed to plan.
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_PLAN_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Terraform init
+        run: terraform init -input=false
+
+      - name: Terraform plan
+        id: plan
+        run: |
+          set +e
+          terraform plan -input=false -no-color -lock-timeout=5m -detailed-exitcode -out=tfplan
+          echo "exitcode=$?" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Show the plan in the job summary
+        if: steps.plan.outputs.exitcode != '1'
+        run: |
+          terraform show -no-color tfplan > "$RUNNER_TEMP/plan.txt"
+          {
+            echo '### Terraform plan'
+            if [ "${{ steps.plan.outputs.exitcode }}" = "0" ]; then
+              echo 'No changes: nothing to apply.'
+            else
+              echo 'Review this plan before approving the `prod` deployment: that exact plan is what gets applied.'
+              echo
+              echo '```hcl'
+              head -c 60000 "$RUNNER_TEMP/plan.txt"
+              echo
+              echo '```'
+              if [ "$(wc -c < "$RUNNER_TEMP/plan.txt")" -gt 60000 ]; then
+                echo '_Plan truncated, see the step log for the full output._'
+              fi
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat "$RUNNER_TEMP/plan.txt"
+
+      - name: Fail if the plan failed
+        if: steps.plan.outputs.exitcode == '1'
+        run: exit 1
+
+      # The repository is public and a plan file can hold sensitive values (e.g. the alert email), so the
+      # artifact is encrypted. Generate the key once: `openssl rand -base64 32`.
+      - name: Encrypt the plan
+        if: steps.plan.outputs.exitcode == '2'
+        env:
+          PLAN_ENCRYPTION_KEY: ${{ secrets.PLAN_ENCRYPTION_KEY }}
+        run: openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:PLAN_ENCRYPTION_KEY -in tfplan -out tfplan.enc
+
+      - name: Upload the plan
+        if: steps.plan.outputs.exitcode == '2'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: tfplan.enc
+          retention-days: 1
+          if-no-files-found: error
+
   terraform-apply:
     name: Terraform apply
+    needs: terraform-plan
+    # Nothing to approve when the plan has no changes.
+    if: needs.terraform-plan.outputs.exitcode == '2'
     runs-on: ubuntu-latest
     # Required reviewers on this environment are the approval gate. The AWS apply role
     # trusts this environment only.
@@ -34,11 +123,6 @@ jobs:
       id-token: write
     env:
       TF_IN_AUTOMATION: "true"
-      TF_VAR_dr_region: ${{ vars.AWS_REGION }}
-      TF_VAR_name_prefix: ${{ vars.LAMBDA_NAME_PREFIX }}
-      TF_VAR_ecr_prefix: ${{ vars.ECR_REPOSITORY_PREFIX }}
-      TF_VAR_health_check_url: ${{ vars.HEALTH_CHECK_URL }}
-      TF_VAR_alert_email: ${{ secrets.ALERT_EMAIL }}
     steps:
       - uses: actions/checkout@v4
 
@@ -56,10 +140,17 @@ jobs:
       - name: Terraform init
         run: terraform init -input=false
 
-      - name: Terraform plan
-        run: terraform plan -input=false -no-color -lock-timeout=5m -out=tfplan
+      - name: Download the plan
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan
 
-      # Applies exactly the plan above, not a newer one.
+      - name: Decrypt the plan
+        env:
+          PLAN_ENCRYPTION_KEY: ${{ secrets.PLAN_ENCRYPTION_KEY }}
+        run: openssl enc -d -aes-256-cbc -pbkdf2 -pass env:PLAN_ENCRYPTION_KEY -in tfplan.enc -out tfplan
+
+      # Applies exactly the plan the reviewer saw. If the state changed since, Terraform refuses the
+      # stale plan and the run fails: nothing is applied that was not approved.
       - name: Terraform apply
         run: terraform apply -input=false -no-color -lock-timeout=5m tfplan
-

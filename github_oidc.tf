@@ -21,8 +21,9 @@ locals {
 }
 
 # ------------------------------------------------------- Terraform plan on pull requests
-# Read-only role for the `terraform plan` job of ci.yml. Pull request tokens have a different
-# `sub` claim than main, so they cannot use the apply role (and must not).
+# Read-only role for the `terraform plan` jobs: ci.yml (pull requests) and the plan job of cd.yml
+# (main, before the approval). Neither token has the `prod` environment in its `sub`, so they cannot use
+# the apply role (and must not).
 
 data "aws_iam_policy_document" "github_plan_assume" {
   statement {
@@ -42,7 +43,11 @@ data "aws_iam_policy_document" "github_plan_assume" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["${var.github_sub_prefix}:pull_request"]
+      values = [
+        "${var.github_sub_prefix}:pull_request",
+        # The plan job of cd.yml (push / workflow_dispatch on the apply branch, no environment).
+        "${var.github_sub_prefix}:ref:refs/heads/${var.github_apply_branch}",
+      ]
     }
   }
 }

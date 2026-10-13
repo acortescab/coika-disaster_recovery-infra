@@ -15,7 +15,11 @@ la revisión original y pueden haberse movido.
   - [x] Trust policy: condiciones `ref` y `job_workflow_ref` (variables `github_repository`, `github_apply_branch`, `github_apply_workflow`). Aplicado y verificado en la cuenta.
   - [x] GitHub: environment `prod` con *Deployment branches* = solo `main`. *Prevent self-review* desactivado a propósito (un único mantenedor); activarlo si entra otra persona.
 - [ ] **3. La aprobación del apply es "a ciegas"** (`cd.yml:31, 59-64`)
-  - Job `plan` que sube `tfplan` como artefacto; job `apply` con `environment: prod` que aplica ese mismo artefacto.
+  - [x] `cd.yml` en dos jobs: `terraform-plan` (sin approval, rol de plan, muestra el plan en el resumen y sube `tfplan` cifrado) y `terraform-apply` (`environment: prod`, aplica ese plan).
+  - [x] Trust del rol de plan ampliada a `ref:refs/heads/main` (`github_oidc.tf`).
+  - [ ] Crear el secret `PLAN_ENCRYPTION_KEY` (`openssl rand -base64 32`), el repo es público.
+  - [ ] Aplicar `github_oidc.tf` como administrador **antes** de mergear.
+  - [ ] Probar con un `workflow_dispatch` desde `main`.
 - [ ] **4. `ssm:SendCommand` sobre cualquier instancia** (`main.tf`, módulos `restore_db` y `backup_db`)
   - Condición por tag (`ssm:resourceTag/Name` o `aws:ResourceTag/Name` = `db_instance_name`) en vez de `instance/*`.
 - [ ] **5. Comodines de servicio en el rol de apply** (`github_oidc_apply.tf`)
@@ -80,5 +84,7 @@ la revisión original y pueden haberse movido.
 
 ## Observaciones surgidas durante las correcciones
 
+- [ ] La variable de GitHub `HEALTH_CHECK_URL` está vacía o sin definir: el apply del pipeline dejó `HEALTH_URL = ""` en la Lambda `health_check` (2026-10-13 15:08 UTC). Definir la variable, restaurar la Lambda y comprobar que `AWS_REGION`, `LAMBDA_NAME_PREFIX`, `ECR_REPOSITORY_PREFIX` y el secret `ALERT_EMAIL` existen.
+- [ ] El topic SNS `coika-disaster_recovery-topic` no tiene suscripciones (el email nunca se confirmó o caducó a los 3 días): no llega ninguna alerta. Recrear con `terraform apply` y confirmar el email. Relacionado con el punto 8.
 - [ ] `iam:PassRole` del rol de apply no incluye `events.amazonaws.com`, pero `aws_cloudwatch_event_target.failover` usa `role_arn`. Verificar si el apply del pipeline lo necesita.
 - [ ] El Deny del CodeBuild sobre roles con boundary no cubre `iam:UpdateAssumeRolePolicy` ni tags (la condición `iam:PermissionsBoundary` no aplica a esas acciones).

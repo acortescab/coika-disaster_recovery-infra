@@ -17,11 +17,13 @@ la revisión original y pueden haberse movido.
 - [ ] **3. La aprobación del apply es "a ciegas"** (`cd.yml:31, 59-64`)
   - [x] `cd.yml` en dos jobs: `terraform-plan` (sin approval, rol de plan, muestra el plan en el resumen y sube `tfplan` cifrado) y `terraform-apply` (`environment: prod`, aplica ese plan).
   - [x] Trust del rol de plan ampliada a `ref:refs/heads/main` (`github_oidc.tf`).
-  - [ ] Crear el secret `PLAN_ENCRYPTION_KEY` (`openssl rand -base64 32`), el repo es público.
-  - [ ] Aplicar `github_oidc.tf` como administrador **antes** de mergear.
-  - [ ] Probar con un `workflow_dispatch` desde `main`.
+  - [x] Secret `PLAN_ENCRYPTION_KEY` creado (el repo es público).
+  - [x] `github_oidc.tf` aplicado como administrador y mergeado a `main`.
+  - [x] Job de plan probado desde `main`: sin cambios (2026-10-13).
+  - [ ] Falta probar el camino con cambios: el cifrado del artefacto, la aprobación en `prod` y el `apply` del plan descifrado. Ocurrirá en el próximo cambio real de Terraform.
 - [ ] **4. `ssm:SendCommand` sobre cualquier instancia** (`main.tf`, módulos `restore_db` y `backup_db`)
-  - Condición por tag (`ssm:resourceTag/Name` o `aws:ResourceTag/Name` = `db_instance_name`) en vez de `instance/*`.
+  - [x] Statement del documento separado del de las instancias, que lleva la condición `ssm:resourceTag/Name` = `db_instance_name` (local `db_host_send_command_statements`, compartido por ambas Lambdas).
+  - [ ] Tras el apply, comprobar que `backup_db` y `restore_db` siguen pudiendo lanzar comandos: solo se prueba en un failover/failback real o invocando la Lambda contra el host de BD de `eu-west-1` (hoy parado).
 - [ ] **5. Comodines de servicio en el rol de apply** (`github_oidc_apply.tf`)
   - Sustituir `states:*`, `codebuild:*`, `lambda:*`, `dynamodb:*`, `sns:*` y `logs:*` por acciones enumeradas.
   - `lambda:*` permite invocar `restore_db`; `dynamodb:*` permite escribir el lock de failover.
@@ -84,7 +86,8 @@ la revisión original y pueden haberse movido.
 
 ## Observaciones surgidas durante las correcciones
 
-- [ ] La variable de GitHub `HEALTH_CHECK_URL` está vacía o sin definir: el apply del pipeline dejó `HEALTH_URL = ""` en la Lambda `health_check` (2026-10-13 15:08 UTC). Definir la variable, restaurar la Lambda y comprobar que `AWS_REGION`, `LAMBDA_NAME_PREFIX`, `ECR_REPOSITORY_PREFIX` y el secret `ALERT_EMAIL` existen.
-- [ ] El topic SNS `coika-disaster_recovery-topic` no tiene suscripciones (el email nunca se confirmó o caducó a los 3 días): no llega ninguna alerta. Recrear con `terraform apply` y confirmar el email. Relacionado con el punto 8.
+- [x] La variable de GitHub `HEALTH_CHECK_URL` estaba vacía y el pipeline dejó `HEALTH_URL = ""` en la Lambda `health_check`. Variable definida y Lambda restaurada (verificado 2026-10-13).
+- [x] El topic SNS no tenía suscripciones (email sin confirmar, caducado a los 3 días). Recreada y confirmada (verificado 2026-10-13). Sigue abierto el punto 8: detectar esto automáticamente y un segundo canal de alerta.
+- [ ] `HEALTH_CHECK_URL` apunta a un DNS público de EC2 (`ec2-...compute.amazonaws.com`): cambia si la instancia se reinicia sin Elastic IP. Usar un nombre estable (dominio o DNS de un balanceador).
 - [ ] `iam:PassRole` del rol de apply no incluye `events.amazonaws.com`, pero `aws_cloudwatch_event_target.failover` usa `role_arn`. Verificar si el apply del pipeline lo necesita.
 - [ ] El Deny del CodeBuild sobre roles con boundary no cubre `iam:UpdateAssumeRolePolicy` ni tags (la condición `iam:PermissionsBoundary` no aplica a esas acciones).

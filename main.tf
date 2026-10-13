@@ -1,5 +1,33 @@
 # One module call per lambda in lambdas/<service>/<name>/.
 
+locals {
+  # Run Command (AWS-RunShellScript) for backup_db and restore_db, in both regions. The document cannot
+  # be filtered by tag, but the instance can: the commands only reach the DB host (Name tag), not any
+  # other instance of the account. The document and the instance are separate statements because the tag
+  # condition only applies to the instance.
+  db_host_send_command_statements = [
+    {
+      actions = ["ssm:SendCommand"]
+      resources = [
+        "arn:aws:ssm:${var.dr_region}::document/AWS-RunShellScript",
+        "arn:aws:ssm:${var.primary_region}::document/AWS-RunShellScript",
+      ]
+    },
+    {
+      actions = ["ssm:SendCommand"]
+      resources = [
+        "arn:aws:ec2:${var.dr_region}:${local.account_id}:instance/*",
+        "arn:aws:ec2:${var.primary_region}:${local.account_id}:instance/*",
+      ]
+      conditions = [{
+        test     = "StringEquals"
+        variable = "ssm:resourceTag/Name"
+        values   = [var.db_instance_name]
+      }]
+    },
+  ]
+}
+
 # Restores the newest dump on the DB host of this region (called by the failover state machine).
 module "auth_service_restore_db" {
   source = "./modules/lambda_container"
@@ -17,26 +45,18 @@ module "auth_service_restore_db" {
     DB_INSTANCE_NAME = var.db_instance_name
   }
 
-  policy_statements = [
-    {
+  # The failback also restores into the DB host of the primary region: the commands can reach both.
+  policy_statements = concat(
+    [{
       actions   = ["ec2:DescribeInstances"]
       resources = ["*"]
-    },
-    {
-      # The failback also restores into the DB host of the primary region.
-      actions = ["ssm:SendCommand"]
-      resources = [
-        "arn:aws:ssm:${var.dr_region}::document/AWS-RunShellScript",
-        "arn:aws:ec2:${var.dr_region}:${local.account_id}:instance/*",
-        "arn:aws:ssm:${var.primary_region}::document/AWS-RunShellScript",
-        "arn:aws:ec2:${var.primary_region}:${local.account_id}:instance/*",
-      ]
-    },
-    {
+    }],
+    local.db_host_send_command_statements,
+    [{
       actions   = ["ssm:GetCommandInvocation"]
       resources = ["*"]
-    },
-  ]
+    }],
+  )
 }
 
 # Dumps the DB of a host and returns the key of the dump (called by the db_backup_restore state
@@ -57,25 +77,17 @@ module "auth_service_backup_db" {
     DB_INSTANCE_NAME = var.db_instance_name
   }
 
-  policy_statements = [
-    {
+  policy_statements = concat(
+    [{
       actions   = ["ec2:DescribeInstances"]
       resources = ["*"]
-    },
-    {
-      actions = ["ssm:SendCommand"]
-      resources = [
-        "arn:aws:ssm:${var.dr_region}::document/AWS-RunShellScript",
-        "arn:aws:ec2:${var.dr_region}:${local.account_id}:instance/*",
-        "arn:aws:ssm:${var.primary_region}::document/AWS-RunShellScript",
-        "arn:aws:ec2:${var.primary_region}:${local.account_id}:instance/*",
-      ]
-    },
-    {
+    }],
+    local.db_host_send_command_statements,
+    [{
       actions   = ["ssm:GetCommandInvocation"]
       resources = ["*"]
-    },
-  ]
+    }],
+  )
 }
 
 # Tells a primary-region outage from a local one (called by the failover state machine): probes the

@@ -20,8 +20,9 @@ data "aws_iam_policy_document" "sfn_assume" {
 }
 
 resource "aws_iam_role" "failover_sfn" {
-  name               = "${var.name_prefix}-auth_service-failover-sfn-role"
-  assume_role_policy = data.aws_iam_policy_document.sfn_assume.json
+  name                 = "${var.name_prefix}-auth_service-failover-sfn-role"
+  assume_role_policy   = data.aws_iam_policy_document.sfn_assume.json
+  permissions_boundary = aws_iam_policy.pipeline_boundary.arn
 }
 
 data "aws_iam_policy_document" "failover_sfn" {
@@ -509,8 +510,9 @@ data "aws_iam_policy_document" "events_assume" {
 }
 
 resource "aws_iam_role" "failover_events" {
-  name               = "${var.name_prefix}-auth_service-failover-events-role"
-  assume_role_policy = data.aws_iam_policy_document.events_assume.json
+  name                 = "${var.name_prefix}-auth_service-failover-events-role"
+  assume_role_policy   = data.aws_iam_policy_document.events_assume.json
+  permissions_boundary = aws_iam_policy.pipeline_boundary.arn
 }
 
 resource "aws_iam_role_policy" "failover_events" {

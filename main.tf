@@ -9,6 +9,8 @@ module "auth_service_restore_db" {
   service     = "auth_service"
   name        = "restore_db"
 
+  permissions_boundary = aws_iam_policy.pipeline_boundary.arn
+
   timeout = 900 # the state machine calls it again while the restore is still running
 
   environment = {
@@ -47,6 +49,8 @@ module "auth_service_backup_db" {
   service     = "auth_service"
   name        = "backup_db"
 
+  permissions_boundary = aws_iam_policy.pipeline_boundary.arn
+
   timeout = 900 # the state machine calls it again while the backup is still running
 
   environment = {
@@ -84,6 +88,8 @@ module "auth_service_region_check" {
   service     = "auth_service"
   name        = "region_check"
 
+  permissions_boundary = aws_iam_policy.pipeline_boundary.arn
+
   timeout = 20 # the probes run in parallel, each with its own short timeout
 
   environment = {
@@ -102,6 +108,8 @@ module "auth_service_primary_recovery_check" {
   ecr_prefix  = var.ecr_prefix
   service     = "auth_service"
   name        = "primary_recovery_check"
+
+  permissions_boundary = aws_iam_policy.pipeline_boundary.arn
 
   # The rule is created DISABLED: the failover state machine enables it once the DR region serves and
   # the failback state machine disables it when the primary serves again (Terraform ignores the rule
@@ -139,6 +147,8 @@ module "auth_service_health_check" {
   ecr_prefix  = var.ecr_prefix
   service     = "auth_service"
   name        = "health_check"
+
+  permissions_boundary = aws_iam_policy.pipeline_boundary.arn
 
   # Starts the whole failover process: it publishes the BackendHealth metric that the alarm watches.
   # Disabled while the process is started by hand: uncomment to run it on a schedule. Before doing so,

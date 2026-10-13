@@ -2,9 +2,11 @@
 # environment `prod`, whose required reviewers act as the approval gate.
 #
 # It is NOT a full admin: writes are limited to the resources this repo manages (prefix
-# `coika`). That includes this role and the plan role (their names match the prefix), so the
-# pipeline can update its own permissions: the approval of the `prod` environment is the only gate
-# against a change that grants more access. There is deliberately no explicit Deny on these roles.
+# `coika`). IAM is the sensitive part: the pipeline only creates roles that carry the permissions
+# boundary of iam_boundary.tf, and an explicit Deny keeps it from changing this role, the plan role or
+# the boundary. Changes to github_oidc*.tf and iam_boundary.tf are therefore applied by an
+# administrator from a workstation, never by the pipeline (the pipeline's apply of such a change fails
+# with AccessDenied, by design).
 
 data "aws_iam_policy_document" "github_apply_assume" {
   statement {
@@ -25,6 +27,20 @@ data "aws_iam_policy_document" "github_apply_assume" {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
       values   = ["${var.github_sub_prefix}:environment:${var.github_apply_environment}"]
+    }
+
+    # The `sub` of an environment job carries no branch: without these two, a workflow of any branch
+    # that targets the environment (once a reviewer approves it) would get the role.
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:ref"
+      values   = ["refs/heads/${var.github_apply_branch}"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:job_workflow_ref"
+      values   = ["${var.github_repository}/.github/workflows/${var.github_apply_workflow}@refs/heads/${var.github_apply_branch}"]
     }
   }
 }
@@ -67,22 +83,40 @@ data "aws_iam_policy_document" "github_apply_permissions" {
   }
 
   # --- IAM roles of this project
+  # Roles can only be created, deleted or given policies while they carry the pipeline boundary
+  # (iam_boundary.tf), which caps whatever the pipeline writes into them.
   statement {
+    sid = "RolesWithBoundary"
     actions = [
       "iam:CreateRole",
       "iam:DeleteRole",
-      "iam:UpdateRole",
-      "iam:UpdateAssumeRolePolicy",
+      "iam:PutRolePermissionsBoundary",
       "iam:PutRolePolicy",
       "iam:DeleteRolePolicy",
+    ]
+    resources = ["arn:aws:iam::${local.account_id}:role/${var.name_prefix}-*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PermissionsBoundary"
+      values   = [aws_iam_policy.pipeline_boundary.arn]
+    }
+  }
+
+  statement {
+    sid = "RolesOther"
+    actions = [
+      "iam:UpdateRole",
+      "iam:UpdateAssumeRolePolicy",
       "iam:TagRole",
       "iam:UntagRole",
     ]
     resources = ["arn:aws:iam::${local.account_id}:role/${var.name_prefix}-*"]
   }
 
-  # Only these managed policies can be attached (no AdministratorAccess).
+  # Only these managed policies can be attached (no AdministratorAccess), and only to roles with the boundary.
   statement {
+    sid       = "RoleManagedPolicies"
     actions   = ["iam:AttachRolePolicy", "iam:DetachRolePolicy"]
     resources = ["arn:aws:iam::${local.account_id}:role/${var.name_prefix}-*"]
 
@@ -94,6 +128,44 @@ data "aws_iam_policy_document" "github_apply_permissions" {
         "arn:aws:iam::aws:policy/ReadOnlyAccess",
       ]
     }
+
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PermissionsBoundary"
+      values   = [aws_iam_policy.pipeline_boundary.arn]
+    }
+  }
+
+  # The pipeline cannot change its own access: the plan and apply roles are managed by an administrator
+  # (their names match the prefix, so the Allows above would otherwise cover them), and the boundary
+  # can never be removed from a role.
+  statement {
+    sid    = "DenyPipelineSelfChange"
+    effect = "Deny"
+    actions = [
+      "iam:UpdateRole",
+      "iam:DeleteRole",
+      "iam:UpdateAssumeRolePolicy",
+      "iam:PutRolePolicy",
+      "iam:DeleteRolePolicy",
+      "iam:AttachRolePolicy",
+      "iam:DetachRolePolicy",
+      "iam:PutRolePermissionsBoundary",
+      "iam:DeleteRolePermissionsBoundary",
+      "iam:TagRole",
+      "iam:UntagRole",
+    ]
+    resources = [
+      aws_iam_role.github_plan.arn,
+      aws_iam_role.github_apply.arn,
+    ]
+  }
+
+  statement {
+    sid       = "DenyBoundaryRemoval"
+    effect    = "Deny"
+    actions   = ["iam:DeleteRolePermissionsBoundary"]
+    resources = ["*"]
   }
 
   statement {

@@ -25,8 +25,9 @@ resource "aws_cloudwatch_log_group" "failback_sfn" {
 }
 
 resource "aws_iam_role" "failback_sfn" {
-  name               = "${var.name_prefix}-auth_service-failback-sfn-role"
-  assume_role_policy = data.aws_iam_policy_document.sfn_assume.json
+  name                 = "${var.name_prefix}-auth_service-failback-sfn-role"
+  assume_role_policy   = data.aws_iam_policy_document.sfn_assume.json
+  permissions_boundary = aws_iam_policy.pipeline_boundary.arn
 }
 
 data "aws_iam_policy_document" "failback_sfn" {

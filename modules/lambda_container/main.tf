@@ -49,8 +49,9 @@ data "aws_iam_policy_document" "assume" {
 }
 
 resource "aws_iam_role" "this" {
-  name               = "${local.function_name}-exec"
-  assume_role_policy = data.aws_iam_policy_document.assume.json
+  name                 = "${local.function_name}-exec"
+  assume_role_policy   = data.aws_iam_policy_document.assume.json
+  permissions_boundary = var.permissions_boundary
 }
 
 resource "aws_iam_role_policy_attachment" "logs" {

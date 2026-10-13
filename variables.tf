@@ -16,7 +16,7 @@ variable "ecr_prefix" {
 }
 
 variable "github_sub_prefix" {
-  description = "Prefix of the OIDC `sub` claim of the GitHub repository allowed to assume the CI role from the main branch. This repo uses immutable subjects (owner and repo IDs); get it with `gh api repos/<owner>/<repo>/actions/oidc/customization/sub`."
+  description = "Prefix of the OIDC `sub` claim of the GitHub repository allowed to assume the CI roles. This repo uses immutable subjects (owner and repo IDs); get it with `gh api repos/<owner>/<repo>/actions/oidc/customization/sub`. The apply role also requires the branch and workflow below."
   type        = string
   default     = "repo:acortescab@289379741/coika-disaster_recovery-infra@1414221119"
 }
@@ -25,6 +25,24 @@ variable "github_apply_environment" {
   description = "GitHub environment (with required reviewers) that is allowed to assume the apply role."
   type        = string
   default     = "prod"
+}
+
+variable "github_repository" {
+  description = "GitHub repository (`owner/name`) of this infrastructure; used to build the `job_workflow_ref` the apply role trusts."
+  type        = string
+  default     = "acortescab/coika-disaster_recovery-infra"
+}
+
+variable "github_apply_branch" {
+  description = "Only workflow runs on this branch can assume the apply role."
+  type        = string
+  default     = "main"
+}
+
+variable "github_apply_workflow" {
+  description = "Workflow file (under .github/workflows/) that is the only one allowed to assume the apply role."
+  type        = string
+  default     = "cd.yml"
 }
 
 variable "service_state_bucket" {

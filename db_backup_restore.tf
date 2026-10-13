@@ -85,8 +85,9 @@ resource "aws_cloudwatch_log_group" "db_backup_restore_sfn" {
 }
 
 resource "aws_iam_role" "db_backup_restore_sfn" {
-  name               = "${var.name_prefix}-db_backup_restore-sfn-role"
-  assume_role_policy = data.aws_iam_policy_document.sfn_assume.json
+  name                 = "${var.name_prefix}-db_backup_restore-sfn-role"
+  assume_role_policy   = data.aws_iam_policy_document.sfn_assume.json
+  permissions_boundary = aws_iam_policy.pipeline_boundary.arn
 }
 
 data "aws_iam_policy_document" "db_backup_restore_sfn" {

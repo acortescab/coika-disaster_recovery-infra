@@ -12,8 +12,9 @@ resource "aws_cloudwatch_log_group" "failover_plan_sfn" {
 }
 
 resource "aws_iam_role" "failover_plan_sfn" {
-  name               = "${var.name_prefix}-auth_service-failover_plan-sfn-role"
-  assume_role_policy = data.aws_iam_policy_document.sfn_assume.json
+  name                 = "${var.name_prefix}-auth_service-failover_plan-sfn-role"
+  assume_role_policy   = data.aws_iam_policy_document.sfn_assume.json
+  permissions_boundary = aws_iam_policy.pipeline_boundary.arn
 }
 
 data "aws_iam_policy_document" "failover_plan_sfn" {

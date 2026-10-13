@@ -44,6 +44,12 @@ variable "policy_statements" {
   default = []
 }
 
+variable "permissions_boundary" {
+  description = "ARN of the permissions boundary attached to the execution role."
+  type        = string
+  default     = null
+}
+
 variable "schedule_expression" {
   description = "EventBridge schedule, e.g. \"rate(1 minute)\". Null means no schedule."
   type        = string

@@ -35,8 +35,9 @@ data "aws_iam_policy_document" "failover_assume" {
 }
 
 resource "aws_iam_role" "failover" {
-  name               = "${local.failover_project_name}-role"
-  assume_role_policy = data.aws_iam_policy_document.failover_assume.json
+  name                 = "${local.failover_project_name}-role"
+  assume_role_policy   = data.aws_iam_policy_document.failover_assume.json
+  permissions_boundary = aws_iam_policy.pipeline_boundary.arn
 }
 
 # Enough to plan any resource type. Write permissions are added when apply is enabled.
@@ -221,6 +222,28 @@ data "aws_iam_policy_document" "failover_permissions" {
         "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore",
         "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly",
       ]
+    }
+  }
+
+  # The service prefix (coika-auth_service-*) also matches the roles of this repository (lambdas, state
+  # machines, this build). Their policies cannot be changed from here: they carry the pipeline boundary.
+  statement {
+    sid    = "DenyPolicyChangesOnPipelineRoles"
+    effect = "Deny"
+    actions = [
+      "iam:PutRolePolicy",
+      "iam:DeleteRolePolicy",
+      "iam:AttachRolePolicy",
+      "iam:DetachRolePolicy",
+      "iam:PutRolePermissionsBoundary",
+      "iam:DeleteRolePermissionsBoundary",
+    ]
+    resources = ["arn:aws:iam::${local.account_id}:role/*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PermissionsBoundary"
+      values   = [aws_iam_policy.pipeline_boundary.arn]
     }
   }
 
